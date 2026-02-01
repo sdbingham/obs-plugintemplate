@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# Check project conventions (methods, structure, naming, NestJS). See docs/CONVENTIONS.md.
+# Exit 0 if all pass, 1 if any fail. Run from repo root.
+# Usage: ./build-aux/check-conventions [ROOT]
+#   ROOT=. (default) — full project check (src/ + NestJS + CMake).
+#   ROOT=build-aux/convention-fixtures — fixture check (printf, exit, layout, includes only).
+
+set -e
+ROOT="${1:-.}"
+SRC="${ROOT}/src"
+FAILED=0
+FULL_CHECK=0
+[[ "$ROOT" == "." ]] && FULL_CHECK=1
+
+# --- 1. No printf/fprintf (use obs_log only) ---
+check_no_printf() {
+  local files
+  files=$(grep -rl --include='*.c' --include='*.h' -E '\b(printf|fprintf)\s*\(' "$SRC" 2>/dev/null || true)
+  if [[ -n "$files" ]]; then
+    echo "::error::CONVENTIONS: Use obs_log() only. No printf/fprintf. Found in:"
+    echo "$files" | while read -r f; do echo "  $f"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 2. No exit() (log and return instead) ---
+check_no_exit() {
+  local files
+  files=$(grep -rl --include='*.c' --include='*.h' -E '\bexit\s*\(' "$SRC" 2>/dev/null || true)
+  if [[ -n "$files" ]]; then
+    echo "::error::CONVENTIONS: Do not call exit(). Log and return. Found in:"
+    echo "$files" | while read -r f; do echo "  $f"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 3. Source layout: .c only in src/<module>/ as <module>.module.c or .service.c (or plugin-main.c, common) ---
+check_src_layout() {
+  local bad=""
+  while IFS= read -r -d '' f; do
+    local base dir name
+    base=$(basename "$f" .c)
+    dir=$(dirname "$f")
+    name=$(basename "$dir")
+    if [[ "$base" == "plugin-main" ]]; then
+      continue
+    fi
+    if [[ "$dir" == *"/common" ]]; then
+      [[ "$base" == "plugin-support" ]] || bad="$bad$f (common: expect plugin-support.c only)$(printf '\n')"
+      continue
+    fi
+    if [[ "$base" != "${name}.module" && "$base" != "${name}.service" ]]; then
+      bad="$bad$f (expect ${name}.module.c or ${name}.service.c)$(printf '\n')"
+    fi
+  done < <(find "$SRC" -name "*.c" -print0 2>/dev/null)
+  if [[ -n "$bad" ]]; then
+    echo "::error::CONVENTIONS: Source layout. Each src/<module>/*.c must be <module>.module.c or <module>.service.c."
+    echo "$bad" | while read -r line; do [[ -n "$line" ]] && echo "  $line"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 4. No parent-path includes (#include "../) in src ---
+check_includes() {
+  local files
+  files=$(grep -rl --include='*.c' --include='*.h' -E '#include\s+"\.\./' "$SRC" 2>/dev/null || true)
+  if [[ -n "$files" ]]; then
+    echo "::error::CONVENTIONS: Use includes relative to src/ (e.g. \"common/...\", \"module/...\"). No \"../\"."
+    echo "$files" | while read -r f; do echo "  $f"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 5. NestJS: required feature modules exist with exact four files each ---
+check_nestjs_modules() {
+  local required_modules="frontend audio transcription captions"
+  local missing=""
+  for name in $required_modules; do
+    local dir="${SRC}/${name}"
+    if [[ ! -d "$dir" ]]; then
+      missing="${missing}  missing dir: ${dir}$(printf '\n')"
+      continue
+    fi
+    for f in "${name}.module.c" "${name}.module.h" "${name}.service.c" "${name}.service.h"; do
+      if [[ ! -f "${dir}/${f}" ]]; then
+        missing="${missing}  missing: ${dir}/${f}$(printf '\n')"
+      fi
+    done
+  done
+  if [[ ! -d "${SRC}/common" ]]; then
+    missing="${missing}  missing dir: ${SRC}/common$(printf '\n')"
+  else
+    [[ -f "${SRC}/common/plugin-support.h" ]] || missing="${missing}  missing: ${SRC}/common/plugin-support.h$(printf '\n')"
+    [[ -f "${SRC}/common/plugin-support.c.in" ]] || missing="${missing}  missing: ${SRC}/common/plugin-support.c.in$(printf '\n')"
+  fi
+  if [[ -n "$missing" ]]; then
+    echo "::error::CONVENTIONS: NestJS structure. Required modules (frontend, audio, transcription, captions) and common must have exact files. See docs/STRUCTURE.md."
+    echo "$missing" | while read -r line; do [[ -n "$line" ]] && echo "$line"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 6. plugin-main.c load order: frontend → audio → transcription → captions; unload reverse ---
+check_load_order_portable() {
+  local main="${SRC}/plugin-main.c"
+  if [[ ! -f "$main" ]]; then
+    echo "::error::CONVENTIONS: plugin-main.c not found."
+    return 1
+  fi
+  local init_ok=0 unload_ok=0
+  if grep -q "frontend_module_init" "$main" && grep -q "audio_module_init" "$main" && grep -q "transcription_module_init" "$main" && grep -q "captions_module_init" "$main"; then
+    init_ok=1
+  fi
+  if grep -q "captions_module_unload" "$main" && grep -q "transcription_module_unload" "$main" && grep -q "audio_module_unload" "$main" && grep -q "frontend_module_unload" "$main"; then
+    unload_ok=1
+  fi
+  if [[ $init_ok -ne 1 ]]; then
+    echo "::error::CONVENTIONS: plugin-main.c must call frontend_module_init, audio_module_init, transcription_module_init, captions_module_init. See docs/STRUCTURE.md."
+    return 1
+  fi
+  if [[ $unload_ok -ne 1 ]]; then
+    echo "::error::CONVENTIONS: plugin-main.c must call captions_module_unload, transcription_module_unload, audio_module_unload, frontend_module_unload. See docs/STRUCTURE.md."
+    return 1
+  fi
+  # Order: find line numbers and require frontend_init < audio_init < transcription_init < captions_init
+  local fi ai ti ci
+  fi=$(grep -n "frontend_module_init" "$main" | head -1 | cut -d: -f1)
+  ai=$(grep -n "audio_module_init" "$main" | head -1 | cut -d: -f1)
+  ti=$(grep -n "transcription_module_init" "$main" | head -1 | cut -d: -f1)
+  ci=$(grep -n "captions_module_init" "$main" | head -1 | cut -d: -f1)
+  if [[ -z "$fi" || -z "$ai" || -z "$ti" || -z "$ci" ]] || [[ $fi -ge $ai || $ai -ge $ti || $ti -ge $ci ]]; then
+    echo "::error::CONVENTIONS: plugin-main.c init order must be: frontend → audio → transcription → captions. See docs/STRUCTURE.md."
+    return 1
+  fi
+  local cu tu au fu
+  cu=$(grep -n "captions_module_unload" "$main" | head -1 | cut -d: -f1)
+  tu=$(grep -n "transcription_module_unload" "$main" | head -1 | cut -d: -f1)
+  au=$(grep -n "audio_module_unload" "$main" | head -1 | cut -d: -f1)
+  fu=$(grep -n "frontend_module_unload" "$main" | head -1 | cut -d: -f1)
+  if [[ -z "$cu" || -z "$tu" || -z "$au" || -z "$fu" ]] || [[ $cu -ge $tu || $tu -ge $au || $au -ge $fu ]]; then
+    echo "::error::CONVENTIONS: plugin-main.c unload order must be: captions → transcription → audio → frontend. See docs/STRUCTURE.md."
+    return 1
+  fi
+  return 0
+}
+
+# --- 7. Each .module.c delegates to _service_init and _service_unload ---
+check_module_delegates() {
+  local bad=""
+  for name in frontend audio transcription captions; do
+    local mod="${SRC}/${name}/${name}.module.c"
+    if [[ ! -f "$mod" ]]; then
+      continue
+    fi
+    grep -q "${name}_service_init" "$mod" || bad="${bad}  ${mod}: must call ${name}_service_init()$(printf '\n')"
+    grep -q "${name}_service_unload" "$mod" || bad="${bad}  ${mod}: must call ${name}_service_unload()$(printf '\n')"
+  done
+  if [[ -n "$bad" ]]; then
+    echo "::error::CONVENTIONS: Each <name>.module.c must call <name>_service_init() and <name>_service_unload(). No business logic in module. See docs/CONVENTIONS.md §2."
+    echo "$bad" | while read -r line; do [[ -n "$line" ]] && echo "$line"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 8. CMake: only allowed libs (build-aux/allowed-libs.txt) ---
+check_allowed_libs() {
+  local cmake="${ROOT}/CMakeLists.txt"
+  local allowlist="${ROOT}/build-aux/allowed-libs.txt"
+  if [[ ! -f "$cmake" ]] || [[ ! -f "$allowlist" ]]; then
+    return 0
+  fi
+  local allowed
+  allowed=$(grep -v '^#' "$allowlist" | grep -v '^[[:space:]]*$' | sort -u)
+  local pkg
+  pkg=$(grep -E 'find_package\s*\(' "$cmake" | sed -E 's/.*find_package[[:space:]]*\([[:space:]]*([A-Za-z0-9_-]+).*/\1/' | sort -u)
+  local lib
+  lib=$(grep -oE 'OBS::[A-Za-z0-9_-]+|Qt[0-9]::[A-Za-z0-9_-]+' "$cmake" 2>/dev/null | sort -u)
+  local bad=""
+  for p in $pkg; do
+    echo "$allowed" | grep -qFx "$p" || bad="${bad}  find_package($p) not in build-aux/allowed-libs.txt$(printf '\n')"
+  done
+  for l in $lib; do
+    echo "$allowed" | grep -qFx "$l" || bad="${bad}  target_link_libraries(... $l) not in build-aux/allowed-libs.txt$(printf '\n')"
+  done
+  if [[ -n "$bad" ]]; then
+    echo "::error::GUARDRAILS: CMake may only use libs in build-aux/allowed-libs.txt. Add there and in docs/CONVENTIONS.md §3 first. See docs/GUARDRAILS.md."
+    echo "$bad" | while read -r line; do [[ -n "$line" ]] && echo "$line"; done
+    return 1
+  fi
+  return 0
+}
+
+# --- 9. CMakeLists.txt lists all src/*.c (except common/plugin-support — generated) ---
+check_cmake_sources() {
+  local cmake="${ROOT}/CMakeLists.txt"
+  if [[ ! -f "$cmake" ]]; then
+    return 0
+  fi
+  local f rel
+  while IFS= read -r f; do
+    rel="${f#${SRC}/}"
+    rel="src/${rel}"
+    [[ "$rel" == src/common/plugin-support.c ]] && continue
+    [[ "$rel" == *".c.in" ]] && continue
+    grep -qF "$rel" "$cmake" 2>/dev/null || {
+      echo "::error::CONVENTIONS: CMakeLists.txt target_sources must list every src .c file. Missing: $rel"
+      return 1
+    }
+  done < <(find "$SRC" -name "*.c" 2>/dev/null)
+  return 0
+}
+
+# --- Run ---
+main() {
+  if [[ ! -d "$SRC" ]]; then
+    echo "::error::No src/ at $SRC. Run from repo root."
+    exit 1
+  fi
+  FILE_COUNT=$(find "$SRC" -name '*.c' -o -name '*.h' 2>/dev/null | wc -l)
+  echo "Checking conventions (docs/CONVENTIONS.md) in ${SRC} (${FILE_COUNT} .c/.h files):"
+  echo "  - no printf/fprintf (use obs_log only)"
+  echo "  - no exit() (log and return)"
+  echo "  - layout: src/<module>/<module>.module.c or .service.c only"
+  echo "  - includes: no \"../\" (paths relative to src/)"
+  check_no_printf    || FAILED=1
+  check_no_exit      || FAILED=1
+  check_src_layout   || FAILED=1
+  check_includes     || FAILED=1
+
+  if [[ $FULL_CHECK -eq 1 ]]; then
+    echo "  - NestJS: required modules (frontend, audio, transcription, captions, common) with exact files"
+    echo "  - plugin-main.c load order: frontend → audio → transcription → captions; unload reverse"
+    echo "  - each .module.c delegates to _service_init / _service_unload"
+    echo "  - CMake: only libs in build-aux/allowed-libs.txt (no unapproved libs)"
+    echo "  - CMakeLists.txt lists all src .c sources"
+    check_nestjs_modules     || FAILED=1
+    check_load_order_portable || FAILED=1
+    check_module_delegates  || FAILED=1
+    check_allowed_libs      || FAILED=1
+    check_cmake_sources     || FAILED=1
+  fi
+
+  if [[ $FAILED -eq 1 ]]; then
+    echo "Convention checks failed. Update code to match docs/CONVENTIONS.md and docs/STRUCTURE.md."
+    exit 1
+  fi
+  echo "Convention checks passed."
+  exit 0
+}
+
+main "$@"

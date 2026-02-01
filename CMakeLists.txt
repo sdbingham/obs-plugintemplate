@@ -7,6 +7,16 @@ project(${_name} VERSION ${_version})
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
 option(ENABLE_QT "Use Qt functionality" OFF)
 
+set(ENABLE_FRONTEND_API_INT 0)
+set(ENABLE_QT_INT 0)
+if(ENABLE_FRONTEND_API)
+  set(ENABLE_FRONTEND_API_INT 1)
+endif()
+if(ENABLE_QT)
+  set(ENABLE_QT_INT 1)
+endif()
+configure_file(src/config.h.in ${CMAKE_CURRENT_BINARY_DIR}/config.h @ONLY)
+
 include(compilerconfig)
 include(defaults)
 include(helpers)
@@ -34,6 +44,33 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
+target_sources(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE
+    src/plugin-main.c
+    src/transcription/transcription.module.c
+    src/transcription/transcription.service.c
+    src/audio/audio.module.c
+    src/audio/audio.service.c
+    src/captions/captions.module.c
+    src/captions/captions.service.c
+    src/frontend/frontend.module.c
+    src/frontend/frontend.service.c
+)
+
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+if(ENABLE_QT)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}
+    PRIVATE
+      src/frontend/frontend_settings_ui.cpp
+  )
+endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

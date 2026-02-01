@@ -1,0 +1,22 @@
+name: Run check-conventions
+description: Runs convention checks (methods, structure, naming) per docs/CONVENTIONS.md
+inputs:
+  failCondition:
+    description: Controls whether failed checks fail the workflow (error, never)
+    required: false
+    default: error
+  workingDirectory:
+    description: Working directory (repo root)
+    required: false
+    default: ${{ github.workspace }}
+runs:
+  using: composite
+  steps:
+    - name: Check conventions 📋
+      shell: bash
+      working-directory: ${{ inputs.workingDirectory }}
+      run: |
+        : Check conventions per docs/CONVENTIONS.md
+        if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
+        chmod +x build-aux/check-conventions 2>/dev/null || true
+        ./build-aux/check-conventions .

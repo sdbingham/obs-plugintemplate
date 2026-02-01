@@ -25,3 +25,14 @@ jobs:
         uses: ./.github/actions/run-gersemi
         with:
           failCondition: error
+
+  conventions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check conventions 📋
+        uses: ./.github/actions/run-check-conventions
+        with:
+          failCondition: error

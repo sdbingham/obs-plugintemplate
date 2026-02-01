@@ -24,6 +24,37 @@ The plugin template is meant to be used as a starting point for OBS Studio plugi
 
 An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
 
+## Rules for success (follow this — AI and human)
+
+**One check:** Before commit, run `./build-aux/check-conventions .` (CI runs it; merge fails if it fails).
+
+**One rule:** Doc first. No new lib without adding it to `build-aux/allowed-libs.txt` and [docs/CONVENTIONS.md](docs/CONVENTIONS.md) §3. No new feature without a task in [docs/PROJECT_PLAN_TRANSCRIPTION.md](docs/PROJECT_PLAN_TRANSCRIPTION.md) or [docs/PROGRESS.md](docs/PROGRESS.md). No new naming/convention without updating CONVENTIONS. If a change would break that, say so—don’t agree blindly.
+
+**Phase gate:** Don’t start the next phase until the current one is verified (run “How to verify” in [docs/DEFINITION_OF_DONE.md](docs/DEFINITION_OF_DONE.md) for the current phase).
+
+**Hold the AI to it:** If you’re not sure I followed this, say: “Did you follow the Rules for success?” or “Check the rules.” I will re-read this section and confirm.
+
+Detailed refs: [CONVENTIONS](docs/CONVENTIONS.md), [STRUCTURE](docs/STRUCTURE.md), [GUARDRAILS](docs/GUARDRAILS.md), [DEFINITION_OF_DONE](docs/DEFINITION_OF_DONE.md), [PROGRESS](docs/PROGRESS.md).
+
+---
+
+## Focus, progress & conventions (reference)
+
+| Doc | Purpose |
+|-----|--------|
+| [docs/PROJECT_PLAN_TRANSCRIPTION.md](docs/PROJECT_PLAN_TRANSCRIPTION.md) | Requirements and phases |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | Current phase, task status |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Coding rules, naming, libs |
+| [docs/STRUCTURE.md](docs/STRUCTURE.md) | NestJS-style layout |
+| [docs/GUARDRAILS.md](docs/GUARDRAILS.md) | What we guard against |
+| [docs/DEFINITION_OF_DONE.md](docs/DEFINITION_OF_DONE.md) | How to verify each phase |
+| [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) | What we’re assuming |
+| [docs/ALIGNMENT.md](docs/ALIGNMENT.md) | When you add something, update which doc |
+| [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) | OBS & Whisper doc links; what to read when (Phase 1/2); local refs in docs/reference/ |
+| [docs/BUILD_VERIFY.md](docs/BUILD_VERIFY.md) | Confirm template builds and loads (presets, load in OBS) |
+
+Before commit: `./build-aux/check-conventions .`. New libs: add to [build-aux/allowed-libs.txt](build-aux/allowed-libs.txt) and CONVENTIONS §3. Before next phase: verify current phase (DEFINITION_OF_DONE).
+
 ## Documentation
 
 All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).

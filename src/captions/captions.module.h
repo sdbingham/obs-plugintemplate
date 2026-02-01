@@ -9,31 +9,22 @@ the Free Software Foundation; either version 2 of the License, or
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-#include <plugin-support.h>
+#pragma once
 
-const char *PLUGIN_NAME = "@CMAKE_PROJECT_NAME@";
-const char *PLUGIN_VERSION = "@CMAKE_PROJECT_VERSION@";
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-void obs_log(int log_level, const char *format, ...)
-{
-	size_t length = 4 + strlen(PLUGIN_NAME) + strlen(format);
+void captions_module_init(void);
+void captions_module_unload(void);
 
-	char *template = malloc(length + 1);
-
-	snprintf(template, length, "[%s] %s", PLUGIN_NAME, format);
-
-	va_list(args);
-
-	va_start(args, format);
-	blogva(log_level, template, args);
-	va_end(args);
-
-	free(template);
+#ifdef __cplusplus
 }
+#endif
