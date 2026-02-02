@@ -20,15 +20,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "common/plugin-support.h"
 #include "transcription/transcription.service.h"
 #include <obs.h>
+#include <obs-module.h>
 #include <util/threading.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#if ENABLE_WHISPER
+#include "transcription/whisper_wrapper.h"
+#endif
 
 #define CAPTION_SEGMENT_MAX 128
 #define CAPTION_TEXT_MAX 256
 #define STUB_SEGMENT_DURATION_MS 2000
+#define DEFAULT_MODEL_SUBPATH "models/ggml-tiny.en.bin"
 
 typedef struct {
 	char text[CAPTION_TEXT_MAX];
@@ -51,6 +56,9 @@ static bool s_worker_running = false;
 static pthread_t s_worker_thread;
 static pthread_mutex_t s_input_mutex;
 static pthread_cond_t s_input_cond;
+#if ENABLE_WHISPER
+static void *s_whisper_ctx = NULL; /* whisper_wrapper_ctx_t */
+#endif
 
 static void push_caption_segment(const char *text, uint64_t start_ms, uint64_t end_ms)
 {
@@ -86,9 +94,27 @@ static void *worker_thread(void *arg)
 		if (chunk.samples == NULL)
 			continue;
 
-		/* Phase 2 stub: push a placeholder segment (real Whisper in follow-up) */
+#if ENABLE_WHISPER
+		if (s_whisper_ctx) {
+			int ret = whisper_wrapper_run(s_whisper_ctx, chunk.samples, chunk.num_samples, chunk.start_ts_ms);
+			if (ret == 0) {
+				int n = whisper_wrapper_get_segment_count(s_whisper_ctx);
+				for (int i = 0; i < n; i++) {
+					char seg_text[CAPTION_TEXT_MAX];
+					uint64_t t0_ms, t1_ms;
+					whisper_wrapper_get_segment(s_whisper_ctx, i, seg_text, sizeof(seg_text), &t0_ms, &t1_ms);
+					if (seg_text[0] != '\0')
+						push_caption_segment(seg_text, t0_ms, t1_ms);
+				}
+			}
+		} else {
+			uint64_t end_ms = chunk.start_ts_ms + STUB_SEGMENT_DURATION_MS;
+			push_caption_segment("[Phase 2 — transcription stub]", chunk.start_ts_ms, end_ms);
+		}
+#else
 		uint64_t end_ms = chunk.start_ts_ms + STUB_SEGMENT_DURATION_MS;
 		push_caption_segment("[Phase 2 — transcription stub]", chunk.start_ts_ms, end_ms);
+#endif
 
 		bfree(chunk.samples);
 	}
@@ -201,6 +227,27 @@ void transcription_service_init(void)
 	pthread_cond_init(&s_input_cond, NULL);
 	s_pending_chunk.samples = NULL;
 	s_caption_count = 0;
+#if ENABLE_WHISPER
+	s_whisper_ctx = NULL;
+	char *model_path = obs_module_config_path(DEFAULT_MODEL_SUBPATH);
+	if (model_path) {
+		FILE *f = fopen(model_path, "rb");
+		if (f) {
+			fclose(f);
+			s_whisper_ctx = whisper_wrapper_init(model_path, 1);
+			if (s_whisper_ctx)
+				obs_log(LOG_INFO, "transcription: Whisper loaded from %s", model_path);
+			else {
+				s_whisper_ctx = whisper_wrapper_init(model_path, 0);
+				if (s_whisper_ctx)
+					obs_log(LOG_INFO, "transcription: Whisper loaded (CPU) from %s", model_path);
+			}
+		}
+		if (!s_whisper_ctx)
+			obs_log(LOG_WARNING, "transcription: no model at %s; using stub. Add ggml-tiny.en.bin to plugin_config/obs-transcription/models/", model_path ? model_path : "(null)");
+		bfree(model_path);
+	}
+#endif
 
 	s_worker_running = true;
 	if (pthread_create(&s_worker_thread, NULL, worker_thread, NULL) != 0) {
@@ -221,6 +268,12 @@ void transcription_service_unload(void)
 		bfree(s_pending_chunk.samples);
 		s_pending_chunk.samples = NULL;
 	}
+#if ENABLE_WHISPER
+	if (s_whisper_ctx) {
+		whisper_wrapper_free(s_whisper_ctx);
+		s_whisper_ctx = NULL;
+	}
+#endif
 
 	pthread_cond_destroy(&s_input_cond);
 	pthread_mutex_destroy(&s_input_mutex);

@@ -1,9 +1,10 @@
 # Allowed packages and link targets for CMake. One per line. No leading/trailing space.
 # Add a new lib here AND in docs/CONVENTIONS.md §3 before adding find_package or target_link_libraries.
 # See docs/GUARDRAILS.md.
-# Phase 2: add whisper.cpp target(s) and CUDA (e.g. CUDA::cudart) when implementing Whisper; resampling uses libobs only.
+# Phase 2: whisper = target from FetchContent whisper.cpp (GGML_CUDA); resampling uses libobs only.
 
 libobs
+whisper
 obs-frontend-api
 Qt6
 OBS::libobs

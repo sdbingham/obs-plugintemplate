@@ -61,7 +61,10 @@
       "warnings": {"dev": true, "deprecated": true},
       "cacheVariables": {
         "ENABLE_FRONTEND_API": true,
-        "ENABLE_QT": true
+        "ENABLE_QT": true,
+        "ENABLE_WHISPER": true,
+        "ENABLE_WHISPER_CUDA": false,
+        "WHISPER_FATAL_WARNINGS": false
       }
     },
     {
