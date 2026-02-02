@@ -20,8 +20,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "audio/audio.service.h"
 #include <obs.h>
 #include <obs-source.h>
+#include <QAbstractButton>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QLabel>
 #include <QObject>
 #include <QVBoxLayout>
@@ -51,17 +53,47 @@ void frontend_settings_show_dialog(void)
 	s_dialog->setWindowTitle(QStringLiteral("OBS Transcription Settings"));
 	QVBoxLayout *layout = new QVBoxLayout(s_dialog);
 	QLabel *label = new QLabel(QStringLiteral("Audio source to transcribe:"), s_dialog);
+	QLabel *hint = new QLabel(QStringLiteral("Use a microphone or audio input (e.g. Mic/Aux) for speech. Video-only sources will not produce captions."), s_dialog);
+	hint->setWordWrap(true);
+	hint->setStyleSheet(QStringLiteral("color: gray; font-size: small;"));
 	layout->addWidget(label);
+	layout->addWidget(hint);
 	QComboBox *audio_combo = new QComboBox(s_dialog);
 	audio_combo->addItem(QStringLiteral("(None)"), QString());
 	obs_enum_sources(enum_audio_sources, audio_combo);
+	const char *saved_source = audio_service_get_source();
+	if (saved_source && saved_source[0]) {
+		int idx = audio_combo->findText(QString::fromUtf8(saved_source));
+		if (idx >= 0)
+			audio_combo->setCurrentIndex(idx);
+	}
 	layout->addWidget(audio_combo);
-	QObject::connect(audio_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [audio_combo](int idx) {
-		if (idx <= 0)
+
+	auto apply_selection = [audio_combo]() {
+		int idx = audio_combo->currentIndex();
+		if (idx <= 0) {
 			audio_service_set_source(nullptr);
-		else
-			audio_service_set_source(audio_combo->currentText().toUtf8().constData());
+		} else {
+			QByteArray name_utf8 = audio_combo->currentText().toUtf8();
+			audio_service_set_source(name_utf8.isEmpty() ? nullptr : name_utf8.constData());
+		}
+	};
+
+	QDialogButtonBox *buttons = new QDialogButtonBox(
+		QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply,
+		s_dialog);
+	QDialog *dialog = s_dialog;
+	QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, [apply_selection, dialog]() {
+		apply_selection();
+		dialog->accept();
 	});
+	QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+	QObject::connect(buttons, &QDialogButtonBox::clicked, dialog, [apply_selection, buttons](QAbstractButton *button) {
+		if (buttons->buttonRole(button) == QDialogButtonBox::ApplyRole)
+			apply_selection();
+	});
+	layout->addWidget(buttons);
+
 	s_dialog->setAttribute(Qt::WA_DeleteOnClose);
 	QObject::connect(s_dialog, &QObject::destroyed, []() { s_dialog = nullptr; });
 	s_dialog->show();

@@ -20,6 +20,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "common/plugin-support.h"
 #include "frontend/frontend.service.h"
 #include "audio/audio.service.h"
+#include "captions/captions.service.h"
+#include "transcription/transcription.service.h"
 #if ENABLE_FRONTEND_API
 #include <obs-frontend-api.h>
 #include <util/platform.h>
@@ -40,13 +42,22 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
 		s_recording = true;
 		s_t0_ns = os_gettime_ns();
+		captions_service_attach_to_current_scene();
 		audio_service_start();
 		obs_log(LOG_INFO, "recording started, t0 set");
 	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED) {
 		s_recording = false;
 		s_t0_ns = 0;
 		audio_service_stop();
+		{
+			char *last_rec = obs_frontend_get_last_recording();
+			if (last_rec && last_rec[0])
+				transcription_service_write_srt(last_rec);
+			bfree(last_rec);
+		}
 		obs_log(LOG_INFO, "recording stopped");
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		captions_service_detach_from_scene();
 	}
 }
 #endif

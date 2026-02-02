@@ -19,13 +19,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "config.h"
 #include "common/plugin-support.h"
 #include "audio/audio.service.h"
+#include "frontend/frontend.service.h"
+#include "transcription/transcription.service.h"
 #include <obs.h>
+#include <obs-module.h>
 #include <obs-source.h>
 #include <media-io/audio-resampler.h>
 #include <util/platform.h>
 #include <util/threading.h>
+#include <util/config-file.h>
 #include <string.h>
 #include <stdlib.h>
+
+#define CONFIG_SECTION "Transcription"
+#define CONFIG_KEY_AUDIO_SOURCE "AudioSource"
 
 #define CHUNK_SEC 1
 #define CHUNK_FRAMES (16000 * CHUNK_SEC)
@@ -59,15 +66,60 @@ static void on_audio_capture(void *param, obs_source_t *source, const struct aud
 		memcpy(s_buffer + s_buffer_frames, out, out_frames * sizeof(float));
 		s_buffer_frames += out_frames;
 	} else {
+		/* Chunk full: push to transcription (start_ts = now - chunk duration) */
+		uint64_t elapsed_ms = frontend_service_get_elapsed_ms();
+		uint64_t chunk_duration_ms = (uint64_t)s_buffer_frames * 1000 / 16000;
+		uint64_t start_ts_ms = (elapsed_ms >= chunk_duration_ms) ? (elapsed_ms - chunk_duration_ms) : 0;
+		float *chunk_copy = (float *)bmalloc(s_buffer_frames * sizeof(float));
+		if (chunk_copy) {
+			memcpy(chunk_copy, s_buffer, s_buffer_frames * sizeof(float));
+			transcription_service_push_audio_chunk(chunk_copy, s_buffer_frames, start_ts_ms);
+		}
 		s_buffer_frames = 0;
-		obs_log(LOG_DEBUG, "audio chunk ready (1 s), discarded (Phase 1)");
 	}
 	pthread_mutex_unlock(&s_buffer_mutex);
+}
+
+static void save_audio_source_config(void)
+{
+	char *path = obs_module_config_path("config.ini");
+	if (!path)
+		return;
+	config_t *config = NULL;
+	if (config_open(&config, path, CONFIG_OPEN_ALWAYS) != CONFIG_SUCCESS) {
+		bfree(path);
+		return;
+	}
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_AUDIO_SOURCE, s_audio_source_name ? s_audio_source_name : "");
+	config_save(config);
+	config_close(config);
+	bfree(path);
+}
+
+static void load_audio_source_config(void)
+{
+	char *path = obs_module_config_path("config.ini");
+	if (!path)
+		return;
+	config_t *config = NULL;
+	if (config_open(&config, path, CONFIG_OPEN_EXISTING) != CONFIG_SUCCESS) {
+		bfree(path);
+		return;
+	}
+	const char *saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_AUDIO_SOURCE);
+	if (saved && saved[0]) {
+		if (s_audio_source_name)
+			bfree(s_audio_source_name);
+		s_audio_source_name = bstrdup(saved);
+	}
+	config_close(config);
+	bfree(path);
 }
 
 void audio_service_init(void)
 {
 	pthread_mutex_init_value(&s_buffer_mutex);
+	load_audio_source_config();
 }
 
 void audio_service_unload(void)
@@ -84,7 +136,13 @@ void audio_service_set_source(const char *name)
 {
 	if (s_audio_source_name)
 		bfree(s_audio_source_name);
-	s_audio_source_name = name ? bstrdup(name) : NULL;
+	s_audio_source_name = name && name[0] ? bstrdup(name) : NULL;
+	save_audio_source_config();
+}
+
+const char *audio_service_get_source(void)
+{
+	return s_audio_source_name ? s_audio_source_name : "";
 }
 
 void audio_service_start(void)

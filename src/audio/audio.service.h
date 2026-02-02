@@ -25,8 +25,11 @@ extern "C" {
 void audio_service_init(void);
 void audio_service_unload(void);
 
-/** Set the audio source by name (e.g. from settings). Call before start. */
+/** Set the audio source by name (e.g. from settings). Saves to config. Call before start. */
 void audio_service_set_source(const char *name);
+
+/** Get the current audio source name (saved in config). Returns NULL if none. */
+const char *audio_service_get_source(void);
 
 /** Start capturing from the selected source. Called by frontend when recording starts. */
 void audio_service_start(void);

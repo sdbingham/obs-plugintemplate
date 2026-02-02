@@ -25,6 +25,12 @@ extern "C" {
 void captions_service_init(void);
 void captions_service_unload(void);
 
+/** Add caption source to the current scene (e.g. when recording starts). Call from main thread. */
+void captions_service_attach_to_current_scene(void);
+
+/** Remove caption from scene and release scene item. Call before scene collection unloads. */
+void captions_service_detach_from_scene(void);
+
 #ifdef __cplusplus
 }
 #endif
