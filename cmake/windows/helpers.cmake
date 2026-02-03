@@ -22,19 +22,19 @@ function(set_target_properties_plugin target)
 
   set_target_properties(${target} PROPERTIES VERSION 0 SOVERSION ${PLUGIN_VERSION})
 
-  install(TARGETS ${target} RUNTIME DESTINATION "obs-plugins/64bit" LIBRARY DESTINATION "obs-plugins/64bit")
+  install(TARGETS ${target} RUNTIME DESTINATION "${target}/bin/64bit" LIBRARY DESTINATION "${target}/bin/64bit")
 
   install(
     FILES "$<TARGET_PDB_FILE:${target}>"
     CONFIGURATIONS RelWithDebInfo Debug Release
-    DESTINATION "obs-plugins/64bit"
+    DESTINATION "${target}/bin/64bit"
     OPTIONAL
   )
 
   # Plugin runtime dependency; install so "cmake --install" is sufficient.
   set(_w32_pthreads_dll "${CMAKE_CURRENT_SOURCE_DIR}/.deps/bin/64bit/w32-pthreads.dll")
   if(EXISTS "${_w32_pthreads_dll}")
-    install(FILES "${_w32_pthreads_dll}" DESTINATION "obs-plugins/64bit")
+    install(FILES "${_w32_pthreads_dll}" DESTINATION "${target}/bin/64bit")
   endif()
   unset(_w32_pthreads_dll)
 
@@ -45,11 +45,11 @@ function(set_target_properties_plugin target)
   add_custom_command(
     TARGET ${target}
     POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/obs-plugins/64bit"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/bin/64bit"
     COMMAND
       "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:${target}>"
       "$<$<CONFIG:Debug,RelWithDebInfo,Release>:$<TARGET_PDB_FILE:${target}>>"
-      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/obs-plugins/64bit"
+      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/bin/64bit"
     COMMENT "Copy ${target} to rundir"
     VERBATIM
   )
@@ -61,7 +61,7 @@ function(set_target_properties_plugin target)
       TARGET ${target}
       POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_w32_pthreads_dll}"
-              "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/obs-plugins/64bit"
+              "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/bin/64bit"
       COMMENT "Copy w32-pthreads.dll to rundir (plugin dependency)"
       VERBATIM
     )
@@ -96,7 +96,7 @@ function(target_install_resources target)
       source_group("Resources/${relative_path}" FILES "${data_file}")
     endforeach()
 
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION "data/obs-plugins/${target}"
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION "${target}/data"
             USE_SOURCE_PERMISSIONS)
 
     add_custom_command(
@@ -104,10 +104,10 @@ function(target_install_resources target)
       POST_BUILD
       COMMAND
         "${CMAKE_COMMAND}" -E make_directory
-        "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/data/obs-plugins/${target}"
+        "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/data"
       COMMAND
         "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/data"
-        "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/data/obs-plugins/${target}"
+        "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/data"
       COMMENT "Copy ${target} resources to rundir"
       VERBATIM
     )
@@ -118,16 +118,16 @@ endfunction()
 function(target_add_resource target resource)
   message(DEBUG "Add resource '${resource}' to target ${target} at destination '${target_destination}'...")
 
-  install(FILES "${resource}" DESTINATION "data/obs-plugins/${target}" COMPONENT Runtime)
+  install(FILES "${resource}" DESTINATION "${target}/data" COMPONENT Runtime)
 
   add_custom_command(
     TARGET ${target}
     POST_BUILD
     COMMAND
       "${CMAKE_COMMAND}" -E make_directory
-      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/data/obs-plugins/${target}"
+        "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/data"
     COMMAND "${CMAKE_COMMAND}" -E copy "${resource}"
-            "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/data/obs-plugins/${target}"
+            "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/data"
     COMMENT "Copy ${target} resource ${resource} to rundir"
     VERBATIM
   )
