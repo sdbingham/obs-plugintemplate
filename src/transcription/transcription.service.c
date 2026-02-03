@@ -28,6 +28,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 #if ENABLE_WHISPER
 #include "transcription/whisper_wrapper.h"
 #endif
@@ -43,6 +44,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define CONFIG_KEY_REPLACE_PHRASES "ReplacePhrases"
 #define DEFAULT_SPEECH_CONFIDENCE_MIN 0.4f
 #define FILTER_REPLACE_BUF_SIZE (CAPTION_TEXT_MAX * 2)
+#define SRT_TEXT_MAX 512
+#define SRT_MERGE_MAX_GAP_MS 500
+#define SRT_MERGE_MAX_DURATION_MS 8000
+#define SRT_MERGE_MAX_CHARS 240
+#define SRT_MIN_SEGMENT_CHARS 12
+#define SRT_MIN_SEGMENT_MS 900
 
 static char *s_filter_phrases = NULL;   /* semicolon-separated phrases to remove (literal) */
 static char *s_replace_phrases = NULL;  /* semicolon-separated "from|to" pairs (literal) */
@@ -195,6 +202,12 @@ typedef struct {
 	uint64_t start_ms;
 	uint64_t end_ms;
 } caption_segment_t;
+
+typedef struct {
+	char text[SRT_TEXT_MAX];
+	uint64_t start_ms;
+	uint64_t end_ms;
+} srt_segment_t;
 
 static caption_segment_t s_caption_segments[CAPTION_SEGMENT_MAX];
 static uint32_t s_caption_count = 0;
@@ -478,6 +491,120 @@ static void ms_to_srt_time(uint64_t ms, char *buf, size_t buf_size)
 	snprintf(buf, buf_size, "%02" PRIu64 ":%02" PRIu64 ":%02" PRIu64 ",%03" PRIu64, h, m, s, millis);
 }
 
+static char last_nonspace_char(const char *text)
+{
+	if (!text)
+		return '\0';
+	size_t len = strlen(text);
+	while (len > 0) {
+		char c = text[len - 1];
+		if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+			return c;
+		len--;
+	}
+	return '\0';
+}
+
+static bool starts_with_lowercase(const char *text)
+{
+	if (!text)
+		return false;
+	const unsigned char *p = (const unsigned char *)text;
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+		p++;
+	if (!*p)
+		return false;
+	return isalpha(*p) && islower(*p);
+}
+
+static bool is_sentence_terminator(char c)
+{
+	return c == '.' || c == '!' || c == '?';
+}
+
+static size_t word_count_limited(const char *text, size_t max_words)
+{
+	if (!text || max_words == 0)
+		return 0;
+	size_t count = 0;
+	bool in_word = false;
+	for (const char *p = text; *p; p++) {
+		if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+			in_word = false;
+		} else if (!in_word) {
+			in_word = true;
+			count++;
+			if (count >= max_words)
+				return count;
+		}
+	}
+	return count;
+}
+
+static bool should_merge_srt(const srt_segment_t *prev, const caption_segment_t *cur)
+{
+	if (!prev || !cur)
+		return false;
+	if (cur->start_ms < prev->end_ms) {
+		/* Overlap: treat as no gap. */
+	} else if (cur->start_ms - prev->end_ms > SRT_MERGE_MAX_GAP_MS) {
+		return false;
+	}
+	uint64_t merged_duration = cur->end_ms - prev->start_ms;
+	if (merged_duration > SRT_MERGE_MAX_DURATION_MS)
+		return false;
+
+	size_t prev_len = strlen(prev->text);
+	size_t cur_len = strlen(cur->text);
+	if (prev_len + cur_len + 2 > SRT_TEXT_MAX)
+		return false;
+	if (prev_len + cur_len + 2 > SRT_MERGE_MAX_CHARS)
+		return false;
+
+	char last = last_nonspace_char(prev->text);
+	bool prev_ends_sentence = is_sentence_terminator(last);
+	bool next_starts_lower = starts_with_lowercase(cur->text);
+	uint64_t prev_dur = prev->end_ms - prev->start_ms;
+
+	if (!prev_ends_sentence)
+		return true;
+	if (next_starts_lower)
+		return true;
+	if (prev_dur < SRT_MIN_SEGMENT_MS)
+		return true;
+	if (prev_len < SRT_MIN_SEGMENT_CHARS)
+		return true;
+	if (word_count_limited(prev->text, 3) < 3)
+		return true;
+
+	return false;
+}
+
+static void append_segment_text(char *dst, size_t dst_size, const char *src)
+{
+	if (!dst || dst_size == 0 || !src || !src[0])
+		return;
+	size_t dst_len = strlen(dst);
+	if (dst_len >= dst_size - 1)
+		return;
+	const char *p = src;
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+		p++;
+	if (!*p)
+		return;
+	char last = last_nonspace_char(dst);
+	bool need_space = false;
+	if (last && last != ' ' && last != '\n' && last != '\t' && last != '\r') {
+		if (*p != '.' && *p != ',' && *p != '!' && *p != '?' && *p != ':' && *p != ';')
+			need_space = true;
+	}
+	if (need_space && dst_len + 1 < dst_size - 1) {
+		dst[dst_len++] = ' ';
+		dst[dst_len] = '\0';
+	}
+	strncat(dst, p, dst_size - dst_len - 1);
+}
+
 void transcription_service_write_srt(const char *video_path)
 {
 	if (!video_path || !video_path[0])
@@ -498,20 +625,64 @@ void transcription_service_write_srt(const char *video_path)
 		obs_log(LOG_WARNING, "transcription: could not open SRT file: %s", srt_path);
 		return;
 	}
+
+	caption_segment_t local_segments[CAPTION_SEGMENT_MAX];
+	uint32_t local_count = 0;
 	pthread_mutex_lock(&s_caption_mutex);
-	if (s_caption_count == 0)
+	local_count = s_caption_count;
+	if (local_count > CAPTION_SEGMENT_MAX)
+		local_count = CAPTION_SEGMENT_MAX;
+	if (local_count > 0)
+		memcpy(local_segments, s_caption_segments, local_count * sizeof(caption_segment_t));
+	pthread_mutex_unlock(&s_caption_mutex);
+
+	if (local_count == 0) {
 		obs_log(LOG_WARNING, "transcription: no segments available; writing empty SRT");
-	for (uint32_t i = 0; i < s_caption_count; i++) {
-		caption_segment_t *seg = &s_caption_segments[i];
+		fclose(f);
+		return;
+	}
+
+	srt_segment_t merged[CAPTION_SEGMENT_MAX];
+	uint32_t merged_count = 0;
+	for (uint32_t i = 0; i < local_count; i++) {
+		caption_segment_t *seg = &local_segments[i];
+		trim_in_place(seg->text);
+		if (is_empty_or_whitespace(seg->text))
+			continue;
+		if (merged_count == 0) {
+			srt_segment_t *dst = &merged[merged_count++];
+			dst->start_ms = seg->start_ms;
+			dst->end_ms = seg->end_ms;
+			dst->text[0] = '\0';
+			append_segment_text(dst->text, sizeof(dst->text), seg->text);
+			continue;
+		}
+		srt_segment_t *prev = &merged[merged_count - 1];
+		if (should_merge_srt(prev, seg)) {
+			append_segment_text(prev->text, sizeof(prev->text), seg->text);
+			if (seg->end_ms > prev->end_ms)
+				prev->end_ms = seg->end_ms;
+			continue;
+		}
+		if (merged_count >= CAPTION_SEGMENT_MAX)
+			break;
+		srt_segment_t *dst = &merged[merged_count++];
+		dst->start_ms = seg->start_ms;
+		dst->end_ms = seg->end_ms;
+		dst->text[0] = '\0';
+		append_segment_text(dst->text, sizeof(dst->text), seg->text);
+	}
+
+	for (uint32_t i = 0; i < merged_count; i++) {
+		srt_segment_t *seg = &merged[i];
 		char start_buf[32];
 		char end_buf[32];
-		char line[512];
+		char line[640];
 		ms_to_srt_time(seg->start_ms, start_buf, sizeof(start_buf));
 		ms_to_srt_time(seg->end_ms, end_buf, sizeof(end_buf));
 		snprintf(line, sizeof(line), "%u\n%s --> %s\n%s\n\n", (unsigned)(i + 1), start_buf, end_buf, seg->text);
 		fputs(line, f);
 	}
-	pthread_mutex_unlock(&s_caption_mutex);
 	fclose(f);
 	obs_log(LOG_INFO, "transcription: wrote SRT to %s", srt_path);
 }
