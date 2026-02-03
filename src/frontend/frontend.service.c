@@ -39,16 +39,23 @@ static uint64_t s_t0_ns = 0;
 static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 {
 	(void)private_data;
-	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
+	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
+		/* Reset segment/caption state and SRT index for new recording (plan § 4.1.1) */
+		captions_service_reset_for_recording(false); /* overwrite vs append: Phase 3 */
+		transcription_service_reset_for_recording();
+		obs_log(LOG_INFO, "recording starting, state reset");
+	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
 		s_recording = true;
 		s_t0_ns = os_gettime_ns();
 		captions_service_attach_to_current_scene();
 		audio_service_start();
 		obs_log(LOG_INFO, "recording started, t0 set");
 	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED) {
+		audio_service_stop();
 		s_recording = false;
 		s_t0_ns = 0;
-		audio_service_stop();
+		if (!transcription_service_wait_for_idle(2000))
+			obs_log(LOG_WARNING, "transcription: worker not idle before SRT write (timeout)");
 		{
 			char *last_rec = obs_frontend_get_last_recording();
 			if (last_rec && last_rec[0])
@@ -58,6 +65,8 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		obs_log(LOG_INFO, "recording stopped");
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
 		captions_service_detach_from_scene();
+	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
+		captions_service_on_exit();
 	}
 }
 #endif

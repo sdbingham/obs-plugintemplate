@@ -65,6 +65,13 @@ int whisper_wrapper_get_segment_count(whisper_wrapper_ctx_t ctx);
 void whisper_wrapper_get_segment(whisper_wrapper_ctx_t ctx, int i, char *text_buf, size_t buf_size,
 				 uint64_t *t0_ms, uint64_t *t1_ms);
 
+/**
+ * No-speech probability for segment i (0..count-1) from last whisper_wrapper_run.
+ * Higher = Whisper thinks this segment is likely silence/no speech. Use to drop
+ * low-confidence segments instead of a text blocklist.
+ */
+float whisper_wrapper_get_segment_no_speech_prob(whisper_wrapper_ctx_t ctx, int i);
+
 #ifdef __cplusplus
 }
 #endif

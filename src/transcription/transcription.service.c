@@ -22,6 +22,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs.h>
 #include <obs-module.h>
 #include <util/threading.h>
+#include <util/config-file.h>
+#include <util/platform.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
@@ -34,6 +36,159 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define CAPTION_TEXT_MAX 256
 #define STUB_SEGMENT_DURATION_MS 2000
 #define DEFAULT_MODEL_SUBPATH "models/ggml-tiny.en.bin"
+#define CHUNK_QUEUE_MAX 30
+#define CONFIG_SECTION "Transcription"
+#define CONFIG_KEY_SPEECH_CONFIDENCE_MIN "SpeechConfidenceMin"
+#define CONFIG_KEY_FILTER_PHRASES "FilterPhrases"
+#define CONFIG_KEY_REPLACE_PHRASES "ReplacePhrases"
+#define DEFAULT_SPEECH_CONFIDENCE_MIN 0.4f
+#define FILTER_REPLACE_BUF_SIZE (CAPTION_TEXT_MAX * 2)
+
+static char *s_filter_phrases = NULL;   /* semicolon-separated phrases to remove (literal) */
+static char *s_replace_phrases = NULL;  /* semicolon-separated "from|to" pairs (literal) */
+
+/* Skip empty or whitespace-only segments (plan § 5.8: skip empty after filter) */
+static bool is_empty_or_whitespace(const char *text)
+{
+	if (!text)
+		return true;
+	while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r')
+		text++;
+	return *text == '\0';
+}
+
+/* Trim leading/trailing whitespace in-place; return pointer to start of content. */
+static void trim_in_place(char *text)
+{
+	if (!text)
+		return;
+	size_t len = strlen(text);
+	while (len > 0 && (text[len - 1] == ' ' || text[len - 1] == '\t' || text[len - 1] == '\n' || text[len - 1] == '\r'))
+		text[--len] = '\0';
+	char *p = text;
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+		p++;
+	if (p != text && *p)
+		memmove(text, p, strlen(p) + 1);
+}
+
+/* Lowercase one char for substring check. */
+static char to_lower(char c)
+{
+	if (c >= 'A' && c <= 'Z')
+		return (char)(c + ('a' - 'A'));
+	return c;
+}
+
+/* Replace all occurrences of 'from' with 'to' in src, write result to dst. Literal only. */
+static void replace_all_to_dst(char *dst, size_t dst_size, const char *src, const char *from, const char *to)
+{
+	if (!dst || dst_size == 0 || !src)
+		return;
+	dst[0] = '\0';
+	if (!from)
+		from = "";
+	if (!to)
+		to = "";
+	size_t from_len = strlen(from);
+	const char *p = src;
+	size_t out = 0;
+	while (*p && out < dst_size - 1) {
+		if (from_len > 0 && strncmp(p, from, from_len) == 0) {
+			size_t to_len = strlen(to);
+			if (out + to_len < dst_size) {
+				memcpy(dst + out, to, to_len + 1);
+				out += to_len;
+			}
+			p += from_len;
+		} else {
+			dst[out++] = *p++;
+			dst[out] = '\0';
+		}
+	}
+	dst[out] = '\0';
+}
+
+/* Apply user filter (remove) and replace rules to text in place. Format: FilterPhrases "a;b;c", ReplacePhrases "x|y;u|v". */
+static void apply_user_filter_replace(char *text, size_t buf_size)
+{
+	if (!text || buf_size == 0)
+		return;
+	if ((!s_filter_phrases || !s_filter_phrases[0]) && (!s_replace_phrases || !s_replace_phrases[0]))
+		return;
+	static char work[FILTER_REPLACE_BUF_SIZE];
+	static char work2[FILTER_REPLACE_BUF_SIZE];
+	size_t work_size = sizeof(work);
+	strncpy(work, text, work_size - 1);
+	work[work_size - 1] = '\0';
+	/* Apply replace rules (from|to; from|to) */
+	if (s_replace_phrases && s_replace_phrases[0]) {
+		char *str = bstrdup(s_replace_phrases);
+		if (str) {
+			for (char *tok = strtok(str, ";"); tok; tok = strtok(NULL, ";")) {
+				char *pipe = strchr(tok, '|');
+				if (pipe) {
+					*pipe = '\0';
+					replace_all_to_dst(work2, sizeof(work2), work, tok, pipe + 1);
+					strncpy(work, work2, work_size - 1);
+					work[work_size - 1] = '\0';
+				}
+			}
+			bfree(str);
+		}
+	}
+	/* Apply filter phrases (remove; literal replace with "") */
+	if (s_filter_phrases && s_filter_phrases[0]) {
+		char *str = bstrdup(s_filter_phrases);
+		if (str) {
+			for (char *tok = strtok(str, ";"); tok; tok = strtok(NULL, ";")) {
+				replace_all_to_dst(work2, sizeof(work2), work, tok, "");
+				strncpy(work, work2, work_size - 1);
+				work[work_size - 1] = '\0';
+			}
+			bfree(str);
+		}
+	}
+	strncpy(text, work, buf_size - 1);
+	text[buf_size - 1] = '\0';
+	trim_in_place(text);
+}
+
+/* Known Whisper hallucinations (BoH-style): drop these so real speech is not drowned out. */
+static bool is_known_hallucination(const char *text)
+{
+	if (!text)
+		return false;
+	char buf[CAPTION_TEXT_MAX];
+	size_t len = strlen(text);
+	if (len >= CAPTION_TEXT_MAX)
+		len = CAPTION_TEXT_MAX - 1;
+	memcpy(buf, text, len + 1);
+	trim_in_place(buf);
+	if (buf[0] == '\0')
+		return false;
+	for (size_t i = 0; buf[i]; i++)
+		buf[i] = to_lower(buf[i]);
+	/* Exact or contains known hallucination phrases */
+	if (strcmp(buf, "the end") == 0)
+		return true;
+	if (strstr(buf, "thanks for watching") != NULL)
+		return true;
+	if (strstr(buf, "thank you for watching") != NULL)
+		return true;
+	if (strstr(buf, "www.") != NULL)
+		return true;
+	if (strstr(buf, "beadaholique") != NULL)
+		return true;
+	/* Music/silence junk: ♪ (UTF-8 E2 99 AA), "pfft", "music" as single-word filler */
+	if (strstr(text, "\xE2\x99\xAA") != NULL)
+		return true;
+	if (strstr(buf, "pfft") != NULL)
+		return true;
+	if (strcmp(buf, "music") == 0)
+		return true;
+	return false;
+}
 
 typedef struct {
 	char text[CAPTION_TEXT_MAX];
@@ -51,17 +206,23 @@ typedef struct {
 	uint64_t start_ts_ms;
 } audio_chunk_t;
 
-static audio_chunk_t s_pending_chunk;
+static audio_chunk_t s_chunk_queue[CHUNK_QUEUE_MAX];
+static uint32_t s_queue_head = 0;
+static uint32_t s_queue_count = 0;
 static bool s_worker_running = false;
+static bool s_worker_busy = false;
 static pthread_t s_worker_thread;
 static pthread_mutex_t s_input_mutex;
 static pthread_cond_t s_input_cond;
 #if ENABLE_WHISPER
 static void *s_whisper_ctx = NULL; /* whisper_wrapper_ctx_t */
 #endif
+static float s_speech_confidence_min = DEFAULT_SPEECH_CONFIDENCE_MIN; /* 0.0–1.0; no_speech threshold = 1 - this */
 
 static void push_caption_segment(const char *text, uint64_t start_ms, uint64_t end_ms)
 {
+	if (is_empty_or_whitespace(text))
+		return;
 	pthread_mutex_lock(&s_caption_mutex);
 	if (s_caption_count >= CAPTION_SEGMENT_MAX) {
 		/* Drop oldest */
@@ -85,10 +246,17 @@ static void *worker_thread(void *arg)
 	(void)arg;
 	while (s_worker_running) {
 		pthread_mutex_lock(&s_input_mutex);
-		while (s_worker_running && s_pending_chunk.samples == NULL)
+		while (s_worker_running && s_queue_count == 0)
 			pthread_cond_wait(&s_input_cond, &s_input_mutex);
-		audio_chunk_t chunk = s_pending_chunk;
-		s_pending_chunk.samples = NULL;
+		audio_chunk_t chunk = {NULL, 0, 0};
+		if (s_queue_count > 0) {
+			uint32_t idx = s_queue_head;
+			chunk = s_chunk_queue[idx];
+			s_chunk_queue[idx].samples = NULL;
+			s_queue_head = (s_queue_head + 1) % CHUNK_QUEUE_MAX;
+			s_queue_count--;
+			s_worker_busy = true;
+		}
 		pthread_mutex_unlock(&s_input_mutex);
 
 		if (chunk.samples == NULL)
@@ -100,11 +268,21 @@ static void *worker_thread(void *arg)
 			if (ret == 0) {
 				int n = whisper_wrapper_get_segment_count(s_whisper_ctx);
 				for (int i = 0; i < n; i++) {
+					float no_speech = whisper_wrapper_get_segment_no_speech_prob(s_whisper_ctx, i);
+					/* Only skip clear non-speech (no_speech > 0.95) so real speech at chunk boundaries is not dropped. */
+					if (no_speech > 0.95f)
+						continue;
 					char seg_text[CAPTION_TEXT_MAX];
 					uint64_t t0_ms, t1_ms;
 					whisper_wrapper_get_segment(s_whisper_ctx, i, seg_text, sizeof(seg_text), &t0_ms, &t1_ms);
-					if (seg_text[0] != '\0')
-						push_caption_segment(seg_text, t0_ms, t1_ms);
+					if (is_empty_or_whitespace(seg_text))
+						continue;
+					if (is_known_hallucination(seg_text))
+						continue; /* BoH-style: drop known hallucination phrases so real speech shows. */
+					apply_user_filter_replace(seg_text, sizeof(seg_text));
+					if (is_empty_or_whitespace(seg_text))
+						continue;
+					push_caption_segment(seg_text, t0_ms, t1_ms);
 				}
 			}
 		} else {
@@ -117,8 +295,111 @@ static void *worker_thread(void *arg)
 #endif
 
 		bfree(chunk.samples);
+		pthread_mutex_lock(&s_input_mutex);
+		s_worker_busy = false;
+		pthread_mutex_unlock(&s_input_mutex);
 	}
 	return NULL;
+}
+
+static void save_transcription_config(void)
+{
+	char *path = obs_module_config_path("config.ini");
+	if (!path)
+		return;
+	config_t *config = NULL;
+	if (config_open(&config, path, CONFIG_OPEN_ALWAYS) != CONFIG_SUCCESS) {
+		bfree(path);
+		return;
+	}
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%.3f", (double)s_speech_confidence_min);
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_SPEECH_CONFIDENCE_MIN, buf);
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_FILTER_PHRASES, s_filter_phrases ? s_filter_phrases : "");
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_REPLACE_PHRASES, s_replace_phrases ? s_replace_phrases : "");
+	config_save(config);
+	config_close(config);
+	bfree(path);
+}
+
+static void load_transcription_config(void)
+{
+	char *path = obs_module_config_path("config.ini");
+	if (!path)
+		return;
+	config_t *config = NULL;
+	if (config_open(&config, path, CONFIG_OPEN_EXISTING) != CONFIG_SUCCESS) {
+		bfree(path);
+		return;
+	}
+	const char *saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_SPEECH_CONFIDENCE_MIN);
+	if (saved && saved[0]) {
+		double v = 0.0;
+		if (sscanf(saved, "%lf", &v) == 1 && v >= 0.0 && v <= 1.0)
+			s_speech_confidence_min = (float)v;
+	}
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_FILTER_PHRASES);
+	if (saved) {
+		if (s_filter_phrases)
+			bfree(s_filter_phrases);
+		s_filter_phrases = saved[0] ? bstrdup(saved) : NULL;
+	}
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_REPLACE_PHRASES);
+	if (saved) {
+		if (s_replace_phrases)
+			bfree(s_replace_phrases);
+		s_replace_phrases = saved[0] ? bstrdup(saved) : NULL;
+	}
+	config_close(config);
+	bfree(path);
+}
+
+float transcription_service_get_speech_confidence_min(void)
+{
+	return s_speech_confidence_min;
+}
+
+void transcription_service_set_speech_confidence_min(float value)
+{
+	if (value < 0.0f)
+		value = 0.0f;
+	if (value > 1.0f)
+		value = 1.0f;
+	s_speech_confidence_min = value;
+	save_transcription_config();
+}
+
+const char *transcription_service_get_filter_phrases(void)
+{
+	return s_filter_phrases ? s_filter_phrases : "";
+}
+
+void transcription_service_set_filter_phrases(const char *value)
+{
+	if (s_filter_phrases)
+		bfree(s_filter_phrases);
+	s_filter_phrases = (value && value[0]) ? bstrdup(value) : NULL;
+	save_transcription_config();
+}
+
+const char *transcription_service_get_replace_phrases(void)
+{
+	return s_replace_phrases ? s_replace_phrases : "";
+}
+
+void transcription_service_set_replace_phrases(const char *value)
+{
+	if (s_replace_phrases)
+		bfree(s_replace_phrases);
+	s_replace_phrases = (value && value[0]) ? bstrdup(value) : NULL;
+	save_transcription_config();
+}
+
+void transcription_service_reset_for_recording(void)
+{
+	pthread_mutex_lock(&s_caption_mutex);
+	s_caption_count = 0;
+	pthread_mutex_unlock(&s_caption_mutex);
 }
 
 void transcription_service_push_audio_chunk(const float *samples, uint32_t num_samples, uint64_t start_ts_ms)
@@ -131,12 +412,23 @@ void transcription_service_push_audio_chunk(const float *samples, uint32_t num_s
 	memcpy(copy, samples, num_samples * sizeof(float));
 
 	pthread_mutex_lock(&s_input_mutex);
-	if (s_pending_chunk.samples != NULL) {
-		bfree(s_pending_chunk.samples);
+	if (s_queue_count >= CHUNK_QUEUE_MAX) {
+		/* Drop oldest chunk to make room */
+		audio_chunk_t *old = &s_chunk_queue[s_queue_head];
+		if (old->samples) {
+			bfree(old->samples);
+			old->samples = NULL;
+		}
+		s_queue_head = (s_queue_head + 1) % CHUNK_QUEUE_MAX;
+		s_queue_count--;
 	}
-	s_pending_chunk.samples = copy;
-	s_pending_chunk.num_samples = num_samples;
-	s_pending_chunk.start_ts_ms = start_ts_ms;
+	{
+		uint32_t tail = (s_queue_head + s_queue_count) % CHUNK_QUEUE_MAX;
+		s_chunk_queue[tail].samples = copy;
+		s_chunk_queue[tail].num_samples = num_samples;
+		s_chunk_queue[tail].start_ts_ms = start_ts_ms;
+		s_queue_count++;
+	}
 	pthread_cond_signal(&s_input_cond);
 	pthread_mutex_unlock(&s_input_mutex);
 }
@@ -207,17 +499,38 @@ void transcription_service_write_srt(const char *video_path)
 		return;
 	}
 	pthread_mutex_lock(&s_caption_mutex);
+	if (s_caption_count == 0)
+		obs_log(LOG_WARNING, "transcription: no segments available; writing empty SRT");
 	for (uint32_t i = 0; i < s_caption_count; i++) {
 		caption_segment_t *seg = &s_caption_segments[i];
 		char start_buf[32];
 		char end_buf[32];
+		char line[512];
 		ms_to_srt_time(seg->start_ms, start_buf, sizeof(start_buf));
 		ms_to_srt_time(seg->end_ms, end_buf, sizeof(end_buf));
-		fprintf(f, "%u\n%s --> %s\n%s\n\n", (unsigned)(i + 1), start_buf, end_buf, seg->text);
+		snprintf(line, sizeof(line), "%u\n%s --> %s\n%s\n\n", (unsigned)(i + 1), start_buf, end_buf, seg->text);
+		fputs(line, f);
 	}
 	pthread_mutex_unlock(&s_caption_mutex);
 	fclose(f);
 	obs_log(LOG_INFO, "transcription: wrote SRT to %s", srt_path);
+}
+
+bool transcription_service_wait_for_idle(uint32_t timeout_ms)
+{
+	uint64_t start = os_gettime_ns();
+	while (true) {
+		bool idle = false;
+		pthread_mutex_lock(&s_input_mutex);
+		idle = (s_queue_count == 0 && !s_worker_busy);
+		pthread_mutex_unlock(&s_input_mutex);
+		if (idle)
+			return true;
+		uint64_t elapsed_ms = (os_gettime_ns() - start) / 1000000;
+		if (elapsed_ms >= timeout_ms)
+			return false;
+		os_sleep_ms(10);
+	}
 }
 
 void transcription_service_init(void)
@@ -225,8 +538,13 @@ void transcription_service_init(void)
 	pthread_mutex_init_value(&s_caption_mutex);
 	pthread_mutex_init_value(&s_input_mutex);
 	pthread_cond_init(&s_input_cond, NULL);
-	s_pending_chunk.samples = NULL;
+	s_queue_head = 0;
+	s_queue_count = 0;
+	s_worker_busy = false;
+	for (uint32_t i = 0; i < CHUNK_QUEUE_MAX; i++)
+		s_chunk_queue[i].samples = NULL;
 	s_caption_count = 0;
+	load_transcription_config();
 #if ENABLE_WHISPER
 	s_whisper_ctx = NULL;
 	char *model_path = obs_module_config_path(DEFAULT_MODEL_SUBPATH);
@@ -264,10 +582,14 @@ void transcription_service_unload(void)
 	pthread_mutex_unlock(&s_input_mutex);
 	pthread_join(s_worker_thread, NULL);
 
-	if (s_pending_chunk.samples) {
-		bfree(s_pending_chunk.samples);
-		s_pending_chunk.samples = NULL;
+	for (uint32_t i = 0; i < CHUNK_QUEUE_MAX; i++) {
+		if (s_chunk_queue[i].samples) {
+			bfree(s_chunk_queue[i].samples);
+			s_chunk_queue[i].samples = NULL;
+		}
 	}
+	s_queue_head = 0;
+	s_queue_count = 0;
 #if ENABLE_WHISPER
 	if (s_whisper_ctx) {
 		whisper_wrapper_free(s_whisper_ctx);
@@ -275,6 +597,14 @@ void transcription_service_unload(void)
 	}
 #endif
 
+	if (s_filter_phrases) {
+		bfree(s_filter_phrases);
+		s_filter_phrases = NULL;
+	}
+	if (s_replace_phrases) {
+		bfree(s_replace_phrases);
+		s_replace_phrases = NULL;
+	}
 	pthread_cond_destroy(&s_input_cond);
 	pthread_mutex_destroy(&s_input_mutex);
 	pthread_mutex_destroy(&s_caption_mutex);

@@ -18,6 +18,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +32,12 @@ void captions_service_attach_to_current_scene(void);
 
 /** Remove caption from scene and release scene item. Call before scene collection unloads. */
 void captions_service_detach_from_scene(void);
+
+/** Remove caption from scene and release refs. Call on OBS_FRONTEND_EVENT_EXIT so cleanup runs before plugin unload. */
+void captions_service_on_exit(void);
+
+/** Reset caption state for a new recording; clear displayed text. If truncate_file is true, next SRT write (when captions owns export) overwrites. Call from frontend on RECORDING_STARTING. */
+void captions_service_reset_for_recording(bool truncate_file);
 
 #ifdef __cplusplus
 }

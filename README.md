@@ -34,7 +34,7 @@ An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plu
 
 **Hold the AI to it:** If you’re not sure I followed this, say: “Did you follow the Rules for success?” or “Check the rules.” I will re-read this section and confirm.
 
-Detailed refs: [CONVENTIONS](docs/CONVENTIONS.md), [STRUCTURE](docs/STRUCTURE.md), [GUARDRAILS](docs/GUARDRAILS.md), [DEFINITION_OF_DONE](docs/DEFINITION_OF_DONE.md), [PROGRESS](docs/PROGRESS.md).
+Detailed refs: [docs/README.md](docs/README.md), [CONVENTIONS](docs/CONVENTIONS.md), [STRUCTURE](docs/STRUCTURE.md), [GUARDRAILS](docs/GUARDRAILS.md), [DEFINITION_OF_DONE](docs/DEFINITION_OF_DONE.md), [PROGRESS](docs/PROGRESS.md).
 
 ---
 
@@ -42,6 +42,7 @@ Detailed refs: [CONVENTIONS](docs/CONVENTIONS.md), [STRUCTURE](docs/STRUCTURE.md
 
 | Doc | Purpose |
 |-----|--------|
+| [docs/README.md](docs/README.md) | Doc map, rules, and update checklist |
 | [docs/PROJECT_PLAN_TRANSCRIPTION.md](docs/PROJECT_PLAN_TRANSCRIPTION.md) | Requirements and phases |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | Current phase, task status |
 | [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Coding rules, naming, libs |
@@ -49,9 +50,8 @@ Detailed refs: [CONVENTIONS](docs/CONVENTIONS.md), [STRUCTURE](docs/STRUCTURE.md
 | [docs/GUARDRAILS.md](docs/GUARDRAILS.md) | What we guard against |
 | [docs/DEFINITION_OF_DONE.md](docs/DEFINITION_OF_DONE.md) | How to verify each phase |
 | [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) | What we’re assuming |
-| [docs/ALIGNMENT.md](docs/ALIGNMENT.md) | When you add something, update which doc |
 | [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) | OBS & Whisper doc links; what to read when (Phase 1/2); local refs in docs/reference/ |
-| [docs/BUILD_VERIFY.md](docs/BUILD_VERIFY.md) | Confirm template builds and loads (presets, load in OBS) |
+| [docs/BUILD_VERIFY.md](docs/BUILD_VERIFY.md) | Build + load verification (presets, install, Phase 1 manual verify) |
 
 Before commit: `./build-aux/check-conventions .`. New libs: add to [build-aux/allowed-libs.txt](build-aux/allowed-libs.txt) and CONVENTIONS §3. Before next phase: verify current phase (DEFINITION_OF_DONE).
 

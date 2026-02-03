@@ -100,6 +100,13 @@ if(ENABLE_WHISPER)
   FetchContent_MakeAvailable(whisper.cpp)
   set(CMAKE_COMPILE_WARNING_AS_ERROR "${_saved_compile_warning_as_error}" CACHE BOOL "" FORCE)
   unset(_saved_compile_warning_as_error)
+  # Exclude whisper from install: we link it into our plugin DLL; installing its lib/headers
+  # into the OBS prefix would require admin on Windows and is unnecessary.
+  set_target_properties(whisper PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  # Global add_compile_options already applied /WX; disable for whisper (external code).
+  if(MSVC)
+    target_compile_options(whisper PRIVATE /WX-)
+  endif()
   target_sources(
     ${CMAKE_PROJECT_NAME}
     PRIVATE

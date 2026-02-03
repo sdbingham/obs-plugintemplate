@@ -52,6 +52,13 @@ int whisper_wrapper_run(whisper_wrapper_ctx_t ctx, const float *samples, int n_s
 	wparams.no_timestamps = false;
 	wparams.language = "en";
 	wparams.detect_language = false;
+	/* Reduce hallucinations: suppress blank and non-speech tokens; no initial_prompt (avoids biasing toward endings). */
+	wparams.suppress_blank = true;
+	wparams.suppress_nst = true;
+	wparams.initial_prompt = nullptr; /* was "Meeting transcript:" — biased toward formal/ending phrases */
+	wparams.no_speech_thold = 0.5f;   /* let more segments through; we filter junk via is_known_hallucination */
+	/* Reduce repetitive hallucination loops (e.g. "The End" repeated): do not use past transcription as prompt. */
+	wparams.no_context = true;
 	int ret = whisper_full(static_cast<struct whisper_context *>(ctx), wparams, samples, n_samples);
 	return (ret == 0) ? 0 : -1;
 }
@@ -79,14 +86,22 @@ void whisper_wrapper_get_segment(whisper_wrapper_ctx_t ctx, int i, char *text_bu
 	} else {
 		text_buf[0] = '\0';
 	}
+	/* Whisper returns t0/t1 in centiseconds (1/100 s); convert to ms for recording time. */
 	if (t0_ms) {
-		int64_t t0 = whisper_full_get_segment_t0(wctx, i);
-		*t0_ms = (t0 >= 0) ? (s_last_start_ms + (uint64_t)t0) : s_last_start_ms;
+		int64_t t0_cs = whisper_full_get_segment_t0(wctx, i);
+		*t0_ms = (t0_cs >= 0) ? (s_last_start_ms + (uint64_t)(t0_cs * 10)) : s_last_start_ms;
 	}
 	if (t1_ms) {
-		int64_t t1 = whisper_full_get_segment_t1(wctx, i);
-		*t1_ms = (t1 >= 0) ? (s_last_start_ms + (uint64_t)t1) : s_last_start_ms;
+		int64_t t1_cs = whisper_full_get_segment_t1(wctx, i);
+		*t1_ms = (t1_cs >= 0) ? (s_last_start_ms + (uint64_t)(t1_cs * 10)) : s_last_start_ms;
 	}
+}
+
+float whisper_wrapper_get_segment_no_speech_prob(whisper_wrapper_ctx_t ctx, int i)
+{
+	if (!ctx)
+		return 1.0f;
+	return whisper_full_get_segment_no_speech_prob(static_cast<struct whisper_context *>(ctx), i);
 }
 
 } /* extern "C" */

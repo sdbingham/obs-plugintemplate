@@ -18,14 +18,19 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "frontend/frontend_settings_ui.h"
 #include "audio/audio.service.h"
+#include "transcription/transcription.service.h"
 #include <obs.h>
 #include <obs-source.h>
 #include <QAbstractButton>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QObject>
+#include <QScrollArea>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -69,7 +74,75 @@ void frontend_settings_show_dialog(void)
 	}
 	layout->addWidget(audio_combo);
 
-	auto apply_selection = [audio_combo]() {
+	QLabel *mute_label = new QLabel(QStringLiteral("Caption when (optional mute source):"), s_dialog);
+	QLabel *mute_hint = new QLabel(
+		QStringLiteral("If set, transcription runs only when this source is unmuted, active, and showing. Leave empty to use the audio source above."),
+		s_dialog);
+	mute_hint->setWordWrap(true);
+	mute_hint->setStyleSheet(QStringLiteral("color: gray; font-size: small;"));
+	QComboBox *mute_combo = new QComboBox(s_dialog);
+	mute_combo->addItem(QStringLiteral("(None)"), QString());
+	obs_enum_sources(enum_audio_sources, mute_combo);
+	const char *saved_mute = audio_service_get_mute_source();
+	if (saved_mute && saved_mute[0]) {
+		int idx = mute_combo->findText(QString::fromUtf8(saved_mute));
+		if (idx >= 0)
+			mute_combo->setCurrentIndex(idx);
+	}
+	layout->addWidget(mute_label);
+	layout->addWidget(mute_hint);
+	layout->addWidget(mute_combo);
+
+	QCheckBox *process_muted_cb = new QCheckBox(QStringLiteral("Process audio while capture source is muted"), s_dialog);
+	process_muted_cb->setChecked(audio_service_get_process_while_muted());
+	layout->addWidget(process_muted_cb);
+
+	QCheckBox *only_visible_cb = new QCheckBox(QStringLiteral("Only transcribe when capture source is active and showing"), s_dialog);
+	only_visible_cb->setChecked(audio_service_get_only_when_visible());
+	layout->addWidget(only_visible_cb);
+
+	QLabel *speech_label = new QLabel(QStringLiteral("Minimum speech confidence (0–1):"), s_dialog);
+	QLabel *speech_hint = new QLabel(
+		QStringLiteral("Only show segments when Whisper's speech confidence is at least this. Higher = fewer captions, less noise. Default 0.4."),
+		s_dialog);
+	speech_hint->setWordWrap(true);
+	speech_hint->setStyleSheet(QStringLiteral("color: gray; font-size: small;"));
+	QDoubleSpinBox *speech_spin = new QDoubleSpinBox(s_dialog);
+	speech_spin->setRange(0.0, 1.0);
+	speech_spin->setSingleStep(0.05);
+	speech_spin->setDecimals(2);
+	speech_spin->setValue((double)transcription_service_get_speech_confidence_min());
+	layout->addWidget(speech_label);
+	layout->addWidget(speech_hint);
+	layout->addWidget(speech_spin);
+
+	QLabel *filter_label = new QLabel(QStringLiteral("Remove phrases (semicolon-separated):"), s_dialog);
+	QLabel *filter_hint = new QLabel(QStringLiteral("Literal phrases to remove from captions. E.g. \"um; uh; the end\"."), s_dialog);
+	filter_hint->setWordWrap(true);
+	filter_hint->setStyleSheet(QStringLiteral("color: gray; font-size: small;"));
+	QLineEdit *filter_edit = new QLineEdit(s_dialog);
+	filter_edit->setPlaceholderText(QStringLiteral("um; uh"));
+	const char *filter_val = transcription_service_get_filter_phrases();
+	if (filter_val && filter_val[0])
+		filter_edit->setText(QString::fromUtf8(filter_val));
+	layout->addWidget(filter_label);
+	layout->addWidget(filter_hint);
+	layout->addWidget(filter_edit);
+
+	QLabel *replace_label = new QLabel(QStringLiteral("Replace phrases (from|to; semicolon-separated):"), s_dialog);
+	QLabel *replace_hint = new QLabel(QStringLiteral("Literal replacements. E.g. \"foo|bar; w|with\"."), s_dialog);
+	replace_hint->setWordWrap(true);
+	replace_hint->setStyleSheet(QStringLiteral("color: gray; font-size: small;"));
+	QLineEdit *replace_edit = new QLineEdit(s_dialog);
+	replace_edit->setPlaceholderText(QStringLiteral("foo|bar; x|y"));
+	const char *replace_val = transcription_service_get_replace_phrases();
+	if (replace_val && replace_val[0])
+		replace_edit->setText(QString::fromUtf8(replace_val));
+	layout->addWidget(replace_label);
+	layout->addWidget(replace_hint);
+	layout->addWidget(replace_edit);
+
+	auto apply_selection = [audio_combo, mute_combo, process_muted_cb, only_visible_cb, speech_spin, filter_edit, replace_edit]() {
 		int idx = audio_combo->currentIndex();
 		if (idx <= 0) {
 			audio_service_set_source(nullptr);
@@ -77,6 +150,20 @@ void frontend_settings_show_dialog(void)
 			QByteArray name_utf8 = audio_combo->currentText().toUtf8();
 			audio_service_set_source(name_utf8.isEmpty() ? nullptr : name_utf8.constData());
 		}
+		idx = mute_combo->currentIndex();
+		if (idx <= 0) {
+			audio_service_set_mute_source(nullptr);
+		} else {
+			QByteArray name_utf8 = mute_combo->currentText().toUtf8();
+			audio_service_set_mute_source(name_utf8.isEmpty() ? nullptr : name_utf8.constData());
+		}
+		audio_service_set_process_while_muted(process_muted_cb->isChecked());
+		audio_service_set_only_when_visible(only_visible_cb->isChecked());
+		transcription_service_set_speech_confidence_min((float)speech_spin->value());
+		QByteArray f = filter_edit->text().trimmed().toUtf8();
+		transcription_service_set_filter_phrases(f.isEmpty() ? nullptr : f.constData());
+		QByteArray r = replace_edit->text().trimmed().toUtf8();
+		transcription_service_set_replace_phrases(r.isEmpty() ? nullptr : r.constData());
 	};
 
 	QDialogButtonBox *buttons = new QDialogButtonBox(

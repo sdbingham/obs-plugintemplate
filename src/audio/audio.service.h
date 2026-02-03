@@ -18,6 +18,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,8 +30,20 @@ void audio_service_unload(void);
 /** Set the audio source by name (e.g. from settings). Saves to config. Call before start. */
 void audio_service_set_source(const char *name);
 
-/** Get the current audio source name (saved in config). Returns NULL if none. */
+/** Get the current audio source name (saved in config). Returns empty string if none. */
 const char *audio_service_get_source(void);
+
+/** Optional "mute source": only transcribe when this source is unmuted/active/showing. Empty = use same source. */
+void audio_service_set_mute_source(const char *name);
+const char *audio_service_get_mute_source(void);
+
+/** If false, do not push audio when capture source is muted. Default false. */
+void audio_service_set_process_while_muted(bool value);
+bool audio_service_get_process_while_muted(void);
+
+/** If true, only push when capture source is active and showing. Default true. */
+void audio_service_set_only_when_visible(bool value);
+bool audio_service_get_only_when_visible(void);
 
 /** Start capturing from the selected source. Called by frontend when recording starts. */
 void audio_service_start(void);
