@@ -31,6 +31,9 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp)
+endif()
 
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
@@ -38,8 +41,8 @@ if(ENABLE_FRONTEND_API)
 endif()
 
 if(ENABLE_QT)
-  find_package(Qt6 COMPONENTS Widgets Core)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
+  find_package(Qt6 COMPONENTS Widgets Core Network)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
   target_compile_options(
     ${CMAKE_PROJECT_NAME}
     PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
@@ -103,9 +106,17 @@ if(ENABLE_WHISPER)
   # Exclude whisper from install: we link it into our plugin DLL; installing its lib/headers
   # into the OBS prefix would require admin on Windows and is unnecessary.
   set_target_properties(whisper PROPERTIES EXCLUDE_FROM_ALL TRUE)
-  # Global add_compile_options already applied /WX; disable for whisper (external code).
+  # Disable warnings-as-errors and suppress MSVC conversion warnings for whisper (external code).
   if(MSVC)
-    target_compile_options(whisper PRIVATE /WX-)
+    target_compile_options(
+      whisper
+      PRIVATE
+        /WX-
+        /wd4267
+        /wd4244
+        /wd4305
+        /wd4996
+    )
   endif()
   target_sources(
     ${CMAKE_PROJECT_NAME}

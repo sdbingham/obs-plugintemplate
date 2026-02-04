@@ -59,6 +59,7 @@ static bool s_layout_applied = false;
 static float s_last_capture_width = 0.0f;
 static float s_last_capture_center_x = 0.0f;
 static float s_last_capture_bottom_y = 0.0f;
+static bool s_shutting_down = false;
 
 static void apply_caption_layout(void);
 static void wrap_caption_text(const char *input, char *output, size_t output_size);
@@ -84,6 +85,8 @@ static void on_tick(void *param, float seconds)
 {
 	(void)param;
 	(void)seconds;
+	if (s_shutting_down)
+		return;
 	if (!s_caption_source)
 		return;
 	apply_caption_layout();
@@ -207,6 +210,8 @@ static uint32_t get_caption_font_size(obs_data_t *settings)
 
 static bool get_scene_dimensions(uint32_t *scene_w, uint32_t *scene_h)
 {
+	if (s_shutting_down)
+		return false;
 	uint32_t w = 0;
 	uint32_t h = 0;
 	if (s_caption_item) {
@@ -241,6 +246,8 @@ struct capture_bounds_param {
 
 static void get_sceneitem_rect(obs_sceneitem_t *item, float *left, float *top, float *width, float *height)
 {
+	if (s_shutting_down)
+		return;
 	struct vec2 pos;
 	struct vec2 scale;
 	struct vec2 bounds;
@@ -312,6 +319,8 @@ static bool find_active_capture_item(obs_scene_t *scene, obs_sceneitem_t *item, 
 
 static bool get_active_capture_bounds(float *center_x, float *bottom_y, float *width, float *height)
 {
+	if (s_shutting_down)
+		return false;
 	if (!s_caption_item)
 		return false;
 	obs_scene_t *scene = obs_sceneitem_get_scene(s_caption_item);
@@ -399,6 +408,8 @@ static void set_caption_source_layout(uint32_t box_w, uint32_t box_h)
 
 static void apply_caption_layout(void)
 {
+	if (s_shutting_down)
+		return;
 	if (!s_caption_item || !s_caption_source)
 		return;
 	uint32_t scene_w = 0;
@@ -592,6 +603,8 @@ void captions_service_reset_for_recording(bool truncate_file)
 void captions_service_attach_to_current_scene(void)
 {
 #if ENABLE_FRONTEND_API
+	if (s_shutting_down)
+		return;
 	obs_source_t *scene_source = obs_frontend_get_current_scene();
 	if (!scene_source)
 		return;
@@ -685,6 +698,8 @@ void captions_service_attach_to_current_scene(void)
 void captions_service_detach_from_scene(void)
 {
 #if ENABLE_FRONTEND_API
+	if (s_shutting_down)
+		return;
 	/* Release our refs. Do not remove scene item during teardown (causes cleanup errors). */
 	if (s_caption_item) {
 		obs_sceneitem_release(s_caption_item);
@@ -706,10 +721,19 @@ void captions_service_detach_from_scene(void)
 #if ENABLE_FRONTEND_API
 static void remove_caption_and_release_refs(void)
 {
+	if (s_shutting_down) {
+		s_caption_item = NULL;
+		s_caption_source = NULL;
+		s_layout_applied = false;
+		s_last_scene_w = 0;
+		s_last_scene_h = 0;
+		s_last_capture_width = 0.0f;
+		s_last_capture_center_x = 0.0f;
+		s_last_capture_bottom_y = 0.0f;
+		return;
+	}
 	if (s_caption_item) {
-		obs_scene_t *scene = obs_sceneitem_get_scene(s_caption_item);
-		if (scene)
-			obs_sceneitem_remove(s_caption_item);
+		/* Do not remove during shutdown; OBS may already be tearing down scenes. */
 		obs_sceneitem_release(s_caption_item);
 		s_caption_item = NULL;
 	}
@@ -729,8 +753,9 @@ static void remove_caption_and_release_refs(void)
 void captions_service_on_exit(void)
 {
 #if ENABLE_FRONTEND_API
-	/* Remove caption from scene and release refs on exit so OBS does not defer-destroy
-	 * our source later (obs_source_destroy_defer can crash when run after plugin unload). */
+	s_shutting_down = true;
+	obs_remove_tick_callback(on_tick, NULL);
+	/* Avoid touching scene objects during OBS teardown to prevent crashes. */
 	remove_caption_and_release_refs();
 #endif
 }
@@ -738,6 +763,7 @@ void captions_service_on_exit(void)
 void captions_service_unload(void)
 {
 #if ENABLE_FRONTEND_API
+	s_shutting_down = true;
 	obs_remove_tick_callback(on_tick, NULL);
 	/* Cleanup normally done in captions_service_on_exit (OBS_FRONTEND_EVENT_EXIT); fallback if EXIT not fired. */
 	remove_caption_and_release_refs();

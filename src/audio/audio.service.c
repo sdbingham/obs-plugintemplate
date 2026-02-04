@@ -38,14 +38,19 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define CONFIG_KEY_MUTE_SOURCE "MuteSource"
 #define CONFIG_KEY_PROCESS_WHILE_MUTED "ProcessWhileMuted"
 #define CONFIG_KEY_ONLY_WHEN_VISIBLE "OnlyWhenVisible"
+#define CONFIG_KEY_LATENCY_MS "LatencyMs"
 
-#define CHUNK_SEC 3
-#define CHUNK_FRAMES (16000 * CHUNK_SEC)
+#define MIN_LATENCY_MS 1500
+#define MAX_LATENCY_MS 5000
+#define DEFAULT_LATENCY_MS 3000
+#define MAX_CHUNK_FRAMES (16000 * MAX_LATENCY_MS / 1000)
 
 static char *s_audio_source_name = NULL;
 static char *s_mute_source_name = NULL; /* when set, only push when this source is unmuted/active/showing */
 static bool s_process_while_muted = false;
 static bool s_only_when_visible = true;
+static uint32_t s_latency_ms = DEFAULT_LATENCY_MS;
+static uint32_t s_chunk_frames = (16000 * DEFAULT_LATENCY_MS / 1000);
 static obs_source_t *s_capture_source = NULL;
 static audio_resampler_t *s_resampler = NULL;
 static float *s_buffer = NULL;
@@ -55,6 +60,17 @@ static uint64_t s_audio_sample_count = 0;
 static double s_audio_sumsq = 0.0;
 static float s_audio_peak = 0.0f;
 static uint64_t s_audio_last_log_ns = 0;
+
+static void update_chunk_frames(void)
+{
+	if (s_latency_ms < MIN_LATENCY_MS)
+		s_latency_ms = MIN_LATENCY_MS;
+	if (s_latency_ms > MAX_LATENCY_MS)
+		s_latency_ms = MAX_LATENCY_MS;
+	s_chunk_frames = (uint32_t)((uint64_t)s_latency_ms * 16000 / 1000);
+	if (s_chunk_frames == 0)
+		s_chunk_frames = 1;
+}
 
 static bool should_push_audio(void)
 {
@@ -122,7 +138,7 @@ static void on_audio_capture(void *param, obs_source_t *source, const struct aud
 	}
 
 	pthread_mutex_lock(&s_buffer_mutex);
-	if (s_buffer_frames + out_frames <= CHUNK_FRAMES) {
+	if (s_buffer_frames + out_frames <= s_chunk_frames) {
 		memcpy(s_buffer + s_buffer_frames, out, out_frames * sizeof(float));
 		s_buffer_frames += out_frames;
 	} else {
@@ -137,8 +153,8 @@ static void on_audio_capture(void *param, obs_source_t *source, const struct aud
 		}
 		/* Keep overflow from this callback for the next chunk */
 		uint32_t take = out_frames;
-		if (take > CHUNK_FRAMES)
-			take = CHUNK_FRAMES;
+		if (take > s_chunk_frames)
+			take = s_chunk_frames;
 		memcpy(s_buffer, out, take * sizeof(float));
 		s_buffer_frames = take;
 	}
@@ -159,6 +175,9 @@ static void save_audio_source_config(void)
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_MUTE_SOURCE, s_mute_source_name ? s_mute_source_name : "");
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_PROCESS_WHILE_MUTED, s_process_while_muted ? "true" : "false");
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_ONLY_WHEN_VISIBLE, s_only_when_visible ? "true" : "false");
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%u", s_latency_ms);
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_LATENCY_MS, buf);
 	config_save(config);
 	config_close(config);
 	bfree(path);
@@ -192,6 +211,13 @@ static void load_audio_source_config(void)
 	s_only_when_visible = true;
 	if (saved && (strcmp(saved, "false") == 0 || strcmp(saved, "0") == 0))
 		s_only_when_visible = false;
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_LATENCY_MS);
+	if (saved && saved[0]) {
+		unsigned long v = strtoul(saved, NULL, 10);
+		if (v > 0 && v < 60000)
+			s_latency_ms = (uint32_t)v;
+	}
+	update_chunk_frames();
 	config_close(config);
 	bfree(path);
 }
@@ -200,6 +226,7 @@ void audio_service_init(void)
 {
 	pthread_mutex_init_value(&s_buffer_mutex);
 	load_audio_source_config();
+	update_chunk_frames();
 }
 
 void audio_service_unload(void)
@@ -264,6 +291,18 @@ bool audio_service_get_only_when_visible(void)
 	return s_only_when_visible;
 }
 
+uint32_t audio_service_get_latency_ms(void)
+{
+	return s_latency_ms;
+}
+
+void audio_service_set_latency_ms(uint32_t value)
+{
+	s_latency_ms = value;
+	update_chunk_frames();
+	save_audio_source_config();
+}
+
 void audio_service_start(void)
 {
 	if (!s_audio_source_name || !s_audio_source_name[0]) {
@@ -306,7 +345,7 @@ void audio_service_start(void)
 		return;
 	}
 
-	s_buffer = (float *)bmalloc(CHUNK_FRAMES * sizeof(float));
+	s_buffer = (float *)bmalloc(MAX_CHUNK_FRAMES * sizeof(float));
 	s_buffer_frames = 0;
 	s_capture_source = source;
 	obs_source_add_audio_capture_callback(source, on_audio_capture, NULL);

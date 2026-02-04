@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,10 @@ bool audio_service_get_process_while_muted(void);
 /** If true, only push when capture source is active and showing. Default true. */
 void audio_service_set_only_when_visible(bool value);
 bool audio_service_get_only_when_visible(void);
+
+/** Chunk latency in milliseconds (controls live caption delay). */
+uint32_t audio_service_get_latency_ms(void);
+void audio_service_set_latency_ms(uint32_t value);
 
 /** Start capturing from the selected source. Called by frontend when recording starts. */
 void audio_service_start(void);

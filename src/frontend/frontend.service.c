@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #if ENABLE_FRONTEND_API
 #include <obs-frontend-api.h>
 #include <util/platform.h>
+#include <util/threading.h>
 #endif
 #if ENABLE_QT
 #include "frontend/frontend_settings_ui.h"
@@ -35,6 +36,29 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #if ENABLE_FRONTEND_API
 static bool s_recording = false;
 static uint64_t s_t0_ns = 0;
+static pthread_t s_srt_thread;
+static pthread_mutex_t s_srt_mutex;
+static bool s_srt_thread_running = false;
+
+typedef struct {
+	char *path;
+} srt_job_t;
+
+static void *srt_writer_thread(void *data)
+{
+	srt_job_t *job = (srt_job_t *)data;
+	if (job && job->path) {
+		if (!transcription_service_wait_for_idle(15000))
+			obs_log(LOG_WARNING, "transcription: worker not idle before SRT write (timeout, continuing)");
+		transcription_service_write_srt(job->path);
+		bfree(job->path);
+	}
+	bfree(job);
+	pthread_mutex_lock(&s_srt_mutex);
+	s_srt_thread_running = false;
+	pthread_mutex_unlock(&s_srt_mutex);
+	return NULL;
+}
 
 static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 {
@@ -54,12 +78,27 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		audio_service_stop();
 		s_recording = false;
 		s_t0_ns = 0;
-		if (!transcription_service_wait_for_idle(2000))
-			obs_log(LOG_WARNING, "transcription: worker not idle before SRT write (timeout)");
 		{
 			char *last_rec = obs_frontend_get_last_recording();
-			if (last_rec && last_rec[0])
-				transcription_service_write_srt(last_rec);
+			if (last_rec && last_rec[0]) {
+				pthread_mutex_lock(&s_srt_mutex);
+				bool running = s_srt_thread_running;
+				pthread_mutex_unlock(&s_srt_mutex);
+				if (running)
+					pthread_join(s_srt_thread, NULL);
+
+				srt_job_t *job = bmalloc(sizeof(*job));
+				if (job) {
+					job->path = bstrdup(last_rec);
+					pthread_mutex_lock(&s_srt_mutex);
+					s_srt_thread_running = (pthread_create(&s_srt_thread, NULL, srt_writer_thread, job) == 0);
+					pthread_mutex_unlock(&s_srt_mutex);
+					if (!s_srt_thread_running) {
+						bfree(job->path);
+						bfree(job);
+					}
+				}
+			}
 			bfree(last_rec);
 		}
 		obs_log(LOG_INFO, "recording stopped");
@@ -82,6 +121,7 @@ static void on_tools_menu_clicked(void *private_data)
 void frontend_service_init(void)
 {
 #if ENABLE_FRONTEND_API
+	pthread_mutex_init_value(&s_srt_mutex);
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
 #endif
 #if ENABLE_QT
@@ -95,6 +135,12 @@ void frontend_service_unload(void)
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 	s_recording = false;
 	s_t0_ns = 0;
+	pthread_mutex_lock(&s_srt_mutex);
+	bool running = s_srt_thread_running;
+	pthread_mutex_unlock(&s_srt_mutex);
+	if (running)
+		pthread_join(s_srt_thread, NULL);
+	pthread_mutex_destroy(&s_srt_mutex);
 #endif
 }
 

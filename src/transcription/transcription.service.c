@@ -33,15 +33,25 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "transcription/whisper_wrapper.h"
 #endif
 
+static char last_nonspace_char(const char *text);
+static bool starts_with_lowercase(const char *text);
+static bool is_sentence_terminator(char c);
+static size_t word_count_limited(const char *text, size_t max_words);
+static void append_segment_text(char *dst, size_t dst_size, const char *src);
+
 #define CAPTION_SEGMENT_MAX 128
 #define CAPTION_TEXT_MAX 256
 #define STUB_SEGMENT_DURATION_MS 2000
-#define DEFAULT_MODEL_SUBPATH "models/ggml-tiny.en.bin"
-#define CHUNK_QUEUE_MAX 30
+#define DEFAULT_MODEL_FILE "ggml-tiny.en.bin"
+#define DEFAULT_MODEL_SUBPATH "models/" DEFAULT_MODEL_FILE
+#define CHUNK_QUEUE_MAX 120
 #define CONFIG_SECTION "Transcription"
 #define CONFIG_KEY_SPEECH_CONFIDENCE_MIN "SpeechConfidenceMin"
 #define CONFIG_KEY_FILTER_PHRASES "FilterPhrases"
 #define CONFIG_KEY_REPLACE_PHRASES "ReplacePhrases"
+#define CONFIG_KEY_MODEL_FILE "ModelFile"
+#define CONFIG_KEY_LANGUAGE "Language"
+#define CONFIG_KEY_INITIAL_PROMPT "InitialPrompt"
 #define DEFAULT_SPEECH_CONFIDENCE_MIN 0.4f
 #define FILTER_REPLACE_BUF_SIZE (CAPTION_TEXT_MAX * 2)
 #define SRT_TEXT_MAX 512
@@ -50,9 +60,18 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define SRT_MERGE_MAX_CHARS 240
 #define SRT_MIN_SEGMENT_CHARS 12
 #define SRT_MIN_SEGMENT_MS 900
+#define DISPLAY_MERGE_MAX_GAP_MS 700
+#define DISPLAY_PENDING_MIN_CHARS 18
+#define DISPLAY_PENDING_MIN_WORDS 3
+#define DISPLAY_PENDING_MAX_MS 1800
+#define DISPLAY_HISTORY_GAP_MS 700
+#define DISPLAY_HISTORY_MAX_SEGMENTS 4
 
 static char *s_filter_phrases = NULL;   /* semicolon-separated phrases to remove (literal) */
 static char *s_replace_phrases = NULL;  /* semicolon-separated "from|to" pairs (literal) */
+static char *s_model_file = NULL;       /* model file name (e.g. ggml-tiny.en.bin) */
+static char *s_language = NULL;         /* language code (e.g. "en") or "auto" */
+static char *s_initial_prompt = NULL;   /* optional initial prompt */
 
 /* Skip empty or whitespace-only segments (plan § 5.8: skip empty after filter) */
 static bool is_empty_or_whitespace(const char *text)
@@ -85,6 +104,130 @@ static char to_lower(char c)
 	if (c >= 'A' && c <= 'Z')
 		return (char)(c + ('a' - 'A'));
 	return c;
+}
+
+static bool is_repetitive_phrase(const char *text)
+{
+	if (!text)
+		return false;
+	char buf[CAPTION_TEXT_MAX];
+	size_t len = strlen(text);
+	if (len >= CAPTION_TEXT_MAX)
+		len = CAPTION_TEXT_MAX - 1;
+	memcpy(buf, text, len + 1);
+	for (size_t i = 0; buf[i]; i++) {
+		char c = buf[i];
+		if (c >= 'A' && c <= 'Z')
+			buf[i] = (char)(c + ('a' - 'A'));
+		else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+			continue;
+		else
+			buf[i] = ' ';
+	}
+	const char *words[64];
+	size_t counts[64];
+	size_t unique = 0;
+	size_t total = 0;
+	char *tok = strtok(buf, " \t\r\n");
+	while (tok && total < 64) {
+		if (tok[0]) {
+			total++;
+			size_t i = 0;
+			for (; i < unique; i++) {
+				if (strcmp(words[i], tok) == 0) {
+					counts[i]++;
+					break;
+				}
+			}
+			if (i == unique) {
+				words[unique] = tok;
+				counts[unique] = 1;
+				unique++;
+			}
+		}
+		tok = strtok(NULL, " \t\r\n");
+	}
+	if (total < 4)
+		return false;
+	size_t max_count = 0;
+	for (size_t i = 0; i < unique; i++) {
+		if (counts[i] > max_count)
+			max_count = counts[i];
+	}
+	if (unique <= 1)
+		return true;
+	if (max_count * 100 / total >= 80)
+		return true;
+	return false;
+}
+
+static bool is_low_diversity_noise(const char *text)
+{
+	if (!text)
+		return false;
+	char buf[CAPTION_TEXT_MAX];
+	size_t len = strlen(text);
+	if (len >= CAPTION_TEXT_MAX)
+		len = CAPTION_TEXT_MAX - 1;
+	memcpy(buf, text, len + 1);
+	for (size_t i = 0; buf[i]; i++) {
+		char c = buf[i];
+		if (c >= 'A' && c <= 'Z')
+			buf[i] = (char)(c + ('a' - 'A'));
+		else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+			continue;
+		else
+			buf[i] = ' ';
+	}
+	const char *words[64];
+	size_t counts[64];
+	size_t unique = 0;
+	size_t total = 0;
+	char *tok = strtok(buf, " \t\r\n");
+	while (tok && total < 64) {
+		if (tok[0]) {
+			total++;
+			size_t i = 0;
+			for (; i < unique; i++) {
+				if (strcmp(words[i], tok) == 0) {
+					counts[i]++;
+					break;
+				}
+			}
+			if (i == unique) {
+				words[unique] = tok;
+				counts[unique] = 1;
+				unique++;
+			}
+		}
+		tok = strtok(NULL, " \t\r\n");
+	}
+	if (total < 6)
+		return false;
+	size_t max_count = 0;
+	for (size_t i = 0; i < unique; i++) {
+		if (counts[i] > max_count)
+			max_count = counts[i];
+	}
+	if (unique * 100 / total < 34)
+		return true;
+	if (max_count * 100 / total >= 75)
+		return true;
+	return false;
+}
+
+static void strip_trailing_punct(char *s)
+{
+	if (!s)
+		return;
+	size_t len = strlen(s);
+	while (len > 0) {
+		char c = s[len - 1];
+		if (c == '.' || c == ',' || c == '!' || c == '?' || c == ':' || c == ';')
+			s[--len] = '\0';
+		else
+			break;
+	}
 }
 
 /* Replace all occurrences of 'from' with 'to' in src, write result to dst. Literal only. */
@@ -166,6 +309,10 @@ static bool is_known_hallucination(const char *text)
 {
 	if (!text)
 		return false;
+	if (is_repetitive_phrase(text))
+		return true;
+	if (is_low_diversity_noise(text))
+		return true;
 	char buf[CAPTION_TEXT_MAX];
 	size_t len = strlen(text);
 	if (len >= CAPTION_TEXT_MAX)
@@ -176,6 +323,29 @@ static bool is_known_hallucination(const char *text)
 		return false;
 	for (size_t i = 0; buf[i]; i++)
 		buf[i] = to_lower(buf[i]);
+	{
+		/* Drop repeated single-word spam like "you you you". */
+		char tmp[CAPTION_TEXT_MAX];
+		strncpy(tmp, buf, sizeof(tmp) - 1);
+		tmp[sizeof(tmp) - 1] = '\0';
+		const char *first = NULL;
+		char *tok = strtok(tmp, " \t\r\n");
+		size_t count = 0;
+		bool all_same = true;
+		while (tok) {
+			strip_trailing_punct(tok);
+			if (tok[0]) {
+				if (!first)
+					first = tok;
+				else if (strcmp(first, tok) != 0)
+					all_same = false;
+				count++;
+			}
+			tok = strtok(NULL, " \t\r\n");
+		}
+		if (count >= 3 && all_same)
+			return true;
+	}
 	/* Exact or contains known hallucination phrases */
 	if (strcmp(buf, "the end") == 0)
 		return true;
@@ -212,6 +382,9 @@ typedef struct {
 static caption_segment_t s_caption_segments[CAPTION_SEGMENT_MAX];
 static uint32_t s_caption_count = 0;
 static pthread_mutex_t s_caption_mutex;
+static caption_segment_t s_pending_segment = {0};
+static bool s_pending_active = false;
+static pthread_mutex_t s_pending_mutex;
 
 typedef struct {
 	float *samples;
@@ -228,9 +401,57 @@ static pthread_t s_worker_thread;
 static pthread_mutex_t s_input_mutex;
 static pthread_cond_t s_input_cond;
 #if ENABLE_WHISPER
+static pthread_mutex_t s_whisper_mutex;
+#endif
+#if ENABLE_WHISPER
 static void *s_whisper_ctx = NULL; /* whisper_wrapper_ctx_t */
 #endif
 static float s_speech_confidence_min = DEFAULT_SPEECH_CONFIDENCE_MIN; /* 0.0–1.0; no_speech threshold = 1 - this */
+static uint64_t s_last_drop_log_ns = 0;
+
+#if ENABLE_WHISPER
+static char *build_model_path(const char *model_file)
+{
+	if (!model_file || !model_file[0])
+		model_file = DEFAULT_MODEL_FILE;
+	char subpath[256];
+	int written = snprintf(subpath, sizeof(subpath), "models/%s", model_file);
+	if (written <= 0 || (size_t)written >= sizeof(subpath))
+		return NULL;
+	return obs_module_config_path(subpath);
+}
+
+static void transcription_reload_model_locked(void)
+{
+	char *model_path = build_model_path(s_model_file);
+	if (!model_path) {
+		obs_log(LOG_WARNING, "transcription: failed to build model path");
+		return;
+	}
+	FILE *f = fopen(model_path, "rb");
+	if (!f) {
+		obs_log(LOG_WARNING, "transcription: model file not found: %s", model_path);
+		bfree(model_path);
+		return;
+	}
+	fclose(f);
+	if (s_whisper_ctx) {
+		whisper_wrapper_free(s_whisper_ctx);
+		s_whisper_ctx = NULL;
+	}
+	s_whisper_ctx = whisper_wrapper_init(model_path, 1);
+	if (!s_whisper_ctx) {
+		s_whisper_ctx = whisper_wrapper_init(model_path, 0);
+		if (s_whisper_ctx)
+			obs_log(LOG_INFO, "transcription: Whisper loaded (CPU) from %s", model_path);
+		else
+			obs_log(LOG_ERROR, "transcription: failed to load Whisper model: %s", model_path);
+	} else {
+		obs_log(LOG_INFO, "transcription: Whisper loaded from %s", model_path);
+	}
+	bfree(model_path);
+}
+#endif
 
 static void push_caption_segment(const char *text, uint64_t start_ms, uint64_t end_ms)
 {
@@ -252,6 +473,102 @@ static void push_caption_segment(const char *text, uint64_t start_ms, uint64_t e
 	seg->end_ms = end_ms;
 	s_caption_count++;
 	pthread_mutex_unlock(&s_caption_mutex);
+}
+
+static bool should_merge_display(const caption_segment_t *prev, const caption_segment_t *cur)
+{
+	if (!prev || !cur)
+		return false;
+	if (cur->start_ms < prev->end_ms) {
+		/* Overlap: treat as no gap. */
+	} else if (cur->start_ms - prev->end_ms > DISPLAY_MERGE_MAX_GAP_MS) {
+		return false;
+	}
+	char last = last_nonspace_char(prev->text);
+	bool prev_ends_sentence = is_sentence_terminator(last);
+	bool next_starts_lower = starts_with_lowercase(cur->text);
+	size_t prev_len = strlen(prev->text);
+	if (!prev_ends_sentence)
+		return true;
+	if (next_starts_lower)
+		return true;
+	if (prev_len < DISPLAY_PENDING_MIN_CHARS)
+		return true;
+	if (word_count_limited(prev->text, DISPLAY_PENDING_MIN_WORDS) < DISPLAY_PENDING_MIN_WORDS)
+		return true;
+	return false;
+}
+
+static bool should_commit_pending(const caption_segment_t *seg)
+{
+	if (!seg)
+		return false;
+	size_t len = strlen(seg->text);
+	if (len >= DISPLAY_PENDING_MIN_CHARS)
+		return true;
+	if (word_count_limited(seg->text, DISPLAY_PENDING_MIN_WORDS) >= DISPLAY_PENDING_MIN_WORDS)
+		return true;
+	char last = last_nonspace_char(seg->text);
+	if (is_sentence_terminator(last))
+		return true;
+	uint64_t dur = seg->end_ms - seg->start_ms;
+	if (dur >= DISPLAY_PENDING_MAX_MS)
+		return true;
+	return false;
+}
+
+static void commit_pending_if_needed(bool force)
+{
+	pthread_mutex_lock(&s_pending_mutex);
+	if (!s_pending_active)
+		goto done;
+	if (!force && !should_commit_pending(&s_pending_segment))
+		goto done;
+	push_caption_segment(s_pending_segment.text, s_pending_segment.start_ms,
+			     s_pending_segment.end_ms);
+	memset(&s_pending_segment, 0, sizeof(s_pending_segment));
+	s_pending_active = false;
+done:
+	pthread_mutex_unlock(&s_pending_mutex);
+}
+
+static void process_segment_for_display(const char *text, uint64_t start_ms, uint64_t end_ms)
+{
+	caption_segment_t cur = {0};
+	size_t len = strlen(text);
+	if (len >= CAPTION_TEXT_MAX)
+		len = CAPTION_TEXT_MAX - 1;
+	memcpy(cur.text, text, len);
+	cur.text[len] = '\0';
+	cur.start_ms = start_ms;
+	cur.end_ms = end_ms;
+
+	pthread_mutex_lock(&s_pending_mutex);
+	if (!s_pending_active) {
+		s_pending_segment = cur;
+		s_pending_active = true;
+		pthread_mutex_unlock(&s_pending_mutex);
+		commit_pending_if_needed(false);
+		return;
+	}
+
+	if (should_merge_display(&s_pending_segment, &cur)) {
+		append_segment_text(s_pending_segment.text, sizeof(s_pending_segment.text),
+				    cur.text);
+		if (cur.end_ms > s_pending_segment.end_ms)
+			s_pending_segment.end_ms = cur.end_ms;
+		pthread_mutex_unlock(&s_pending_mutex);
+		commit_pending_if_needed(false);
+		return;
+	}
+
+	pthread_mutex_unlock(&s_pending_mutex);
+	commit_pending_if_needed(true);
+	pthread_mutex_lock(&s_pending_mutex);
+	s_pending_segment = cur;
+	s_pending_active = true;
+	pthread_mutex_unlock(&s_pending_mutex);
+	commit_pending_if_needed(false);
 }
 
 static void *worker_thread(void *arg)
@@ -277,27 +594,39 @@ static void *worker_thread(void *arg)
 
 #if ENABLE_WHISPER
 		if (s_whisper_ctx) {
-			int ret = whisper_wrapper_run(s_whisper_ctx, chunk.samples, chunk.num_samples, chunk.start_ts_ms);
-			if (ret == 0) {
-				int n = whisper_wrapper_get_segment_count(s_whisper_ctx);
-				for (int i = 0; i < n; i++) {
-					float no_speech = whisper_wrapper_get_segment_no_speech_prob(s_whisper_ctx, i);
-					/* Only skip clear non-speech (no_speech > 0.95) so real speech at chunk boundaries is not dropped. */
-					if (no_speech > 0.95f)
-						continue;
-					char seg_text[CAPTION_TEXT_MAX];
-					uint64_t t0_ms, t1_ms;
-					whisper_wrapper_get_segment(s_whisper_ctx, i, seg_text, sizeof(seg_text), &t0_ms, &t1_ms);
-					if (is_empty_or_whitespace(seg_text))
-						continue;
-					if (is_known_hallucination(seg_text))
-						continue; /* BoH-style: drop known hallucination phrases so real speech shows. */
-					apply_user_filter_replace(seg_text, sizeof(seg_text));
-					if (is_empty_or_whitespace(seg_text))
-						continue;
-					push_caption_segment(seg_text, t0_ms, t1_ms);
+			const char *lang = transcription_service_get_language();
+			const char *prompt = transcription_service_get_initial_prompt();
+			pthread_mutex_lock(&s_whisper_mutex);
+			if (s_whisper_ctx) {
+				int ret = whisper_wrapper_run(s_whisper_ctx, chunk.samples, chunk.num_samples, chunk.start_ts_ms,
+							      lang, prompt);
+				if (ret == 0) {
+					int n = whisper_wrapper_get_segment_count(s_whisper_ctx);
+					for (int i = 0; i < n; i++) {
+						float no_speech = whisper_wrapper_get_segment_no_speech_prob(s_whisper_ctx, i);
+						float speech_conf = 1.0f - no_speech;
+						/* Skip low-confidence speech. */
+						if (speech_conf < s_speech_confidence_min)
+							continue;
+						char seg_text[CAPTION_TEXT_MAX];
+						uint64_t t0_ms, t1_ms;
+		whisper_wrapper_get_segment(s_whisper_ctx, i, seg_text, sizeof(seg_text), &t0_ms, &t1_ms);
+		if (is_empty_or_whitespace(seg_text))
+			continue;
+		if (is_known_hallucination(seg_text))
+			continue; /* BoH-style: drop known hallucination phrases so real speech shows. */
+		apply_user_filter_replace(seg_text, sizeof(seg_text));
+		if (is_empty_or_whitespace(seg_text))
+			continue;
+		if (is_repetitive_phrase(seg_text))
+			continue;
+		if (is_low_diversity_noise(seg_text))
+			continue;
+		process_segment_for_display(seg_text, t0_ms, t1_ms);
+	}
 				}
 			}
+			pthread_mutex_unlock(&s_whisper_mutex);
 		} else {
 			uint64_t end_ms = chunk.start_ts_ms + STUB_SEGMENT_DURATION_MS;
 			push_caption_segment("[Phase 2 — transcription stub]", chunk.start_ts_ms, end_ms);
@@ -330,6 +659,9 @@ static void save_transcription_config(void)
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_SPEECH_CONFIDENCE_MIN, buf);
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_FILTER_PHRASES, s_filter_phrases ? s_filter_phrases : "");
 	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_REPLACE_PHRASES, s_replace_phrases ? s_replace_phrases : "");
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_MODEL_FILE, s_model_file ? s_model_file : "");
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_LANGUAGE, s_language ? s_language : "");
+	config_set_string(config, CONFIG_SECTION, CONFIG_KEY_INITIAL_PROMPT, s_initial_prompt ? s_initial_prompt : "");
 	config_save(config);
 	config_close(config);
 	bfree(path);
@@ -362,6 +694,28 @@ static void load_transcription_config(void)
 		if (s_replace_phrases)
 			bfree(s_replace_phrases);
 		s_replace_phrases = saved[0] ? bstrdup(saved) : NULL;
+	}
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_MODEL_FILE);
+	if (saved) {
+		if (s_model_file)
+			bfree(s_model_file);
+		s_model_file = saved[0] ? bstrdup(saved) : NULL;
+	}
+	if (!s_model_file)
+		s_model_file = bstrdup(DEFAULT_MODEL_FILE);
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_LANGUAGE);
+	if (saved) {
+		if (s_language)
+			bfree(s_language);
+		s_language = saved[0] ? bstrdup(saved) : NULL;
+	}
+	if (!s_language)
+		s_language = bstrdup("en");
+	saved = config_get_string(config, CONFIG_SECTION, CONFIG_KEY_INITIAL_PROMPT);
+	if (saved) {
+		if (s_initial_prompt)
+			bfree(s_initial_prompt);
+		s_initial_prompt = saved[0] ? bstrdup(saved) : NULL;
 	}
 	config_close(config);
 	bfree(path);
@@ -408,8 +762,56 @@ void transcription_service_set_replace_phrases(const char *value)
 	save_transcription_config();
 }
 
+const char *transcription_service_get_model_file(void)
+{
+	return s_model_file ? s_model_file : DEFAULT_MODEL_FILE;
+}
+
+void transcription_service_set_model_file(const char *value)
+{
+	if (s_model_file)
+		bfree(s_model_file);
+	s_model_file = (value && value[0]) ? bstrdup(value) : bstrdup(DEFAULT_MODEL_FILE);
+	save_transcription_config();
+#if ENABLE_WHISPER
+	pthread_mutex_lock(&s_whisper_mutex);
+	transcription_reload_model_locked();
+	pthread_mutex_unlock(&s_whisper_mutex);
+#endif
+}
+
+const char *transcription_service_get_language(void)
+{
+	return s_language ? s_language : "";
+}
+
+void transcription_service_set_language(const char *value)
+{
+	if (s_language)
+		bfree(s_language);
+	s_language = (value && value[0]) ? bstrdup(value) : NULL;
+	save_transcription_config();
+}
+
+const char *transcription_service_get_initial_prompt(void)
+{
+	return s_initial_prompt ? s_initial_prompt : "";
+}
+
+void transcription_service_set_initial_prompt(const char *value)
+{
+	if (s_initial_prompt)
+		bfree(s_initial_prompt);
+	s_initial_prompt = (value && value[0]) ? bstrdup(value) : NULL;
+	save_transcription_config();
+}
+
 void transcription_service_reset_for_recording(void)
 {
+	pthread_mutex_lock(&s_pending_mutex);
+	memset(&s_pending_segment, 0, sizeof(s_pending_segment));
+	s_pending_active = false;
+	pthread_mutex_unlock(&s_pending_mutex);
 	pthread_mutex_lock(&s_caption_mutex);
 	s_caption_count = 0;
 	pthread_mutex_unlock(&s_caption_mutex);
@@ -434,6 +836,11 @@ void transcription_service_push_audio_chunk(const float *samples, uint32_t num_s
 		}
 		s_queue_head = (s_queue_head + 1) % CHUNK_QUEUE_MAX;
 		s_queue_count--;
+		uint64_t now_ns = os_gettime_ns();
+		if (now_ns - s_last_drop_log_ns > 2000000000ULL) {
+			obs_log(LOG_WARNING, "transcription: audio backlog exceeded; dropping old chunks");
+			s_last_drop_log_ns = now_ns;
+		}
 	}
 	{
 		uint32_t tail = (s_queue_head + s_queue_count) % CHUNK_QUEUE_MAX;
@@ -453,29 +860,58 @@ void transcription_service_get_display_text(uint64_t elapsed_ms, char *buf, size
 	buf[0] = '\0';
 
 	pthread_mutex_lock(&s_caption_mutex);
+	caption_segment_t *current = NULL;
 	for (uint32_t i = s_caption_count; i > 0; i--) {
 		caption_segment_t *seg = &s_caption_segments[i - 1];
 		if (elapsed_ms >= seg->start_ms && elapsed_ms <= seg->end_ms) {
-			size_t len = strlen(seg->text);
-			if (len >= buf_size)
-				len = buf_size - 1;
-			memcpy(buf, seg->text, len);
-			buf[len] = '\0';
-			pthread_mutex_unlock(&s_caption_mutex);
-			return;
-		}
-	}
-	/* No segment at this time: show most recent that has started */
-	for (uint32_t i = s_caption_count; i > 0; i--) {
-		caption_segment_t *seg = &s_caption_segments[i - 1];
-		if (elapsed_ms >= seg->start_ms) {
-			size_t len = strlen(seg->text);
-			if (len >= buf_size)
-				len = buf_size - 1;
-			memcpy(buf, seg->text, len);
-			buf[len] = '\0';
+			current = seg;
 			break;
 		}
+	}
+	if (!current) {
+		for (uint32_t i = s_caption_count; i > 0; i--) {
+			caption_segment_t *seg = &s_caption_segments[i - 1];
+			if (elapsed_ms >= seg->start_ms) {
+				current = seg;
+				break;
+			}
+		}
+	}
+	if (current) {
+		char temp[CAPTION_TEXT_MAX];
+		size_t len = strlen(current->text);
+		if (len >= sizeof(temp))
+			len = sizeof(temp) - 1;
+		memcpy(temp, current->text, len);
+		temp[len] = '\0';
+
+		uint32_t used = 1;
+		uint64_t cur_start = current->start_ms;
+		for (uint32_t i = s_caption_count; i > 0 && used < DISPLAY_HISTORY_MAX_SEGMENTS; i--) {
+			caption_segment_t *seg = &s_caption_segments[i - 1];
+			if (seg == current)
+				continue;
+			if (seg->end_ms > cur_start)
+				continue;
+			if (cur_start - seg->end_ms > DISPLAY_HISTORY_GAP_MS)
+				break;
+			size_t seg_len = strlen(seg->text);
+			size_t temp_len = strlen(temp);
+			if (temp_len + seg_len + 2 >= sizeof(temp))
+				break;
+			char combined[CAPTION_TEXT_MAX];
+			snprintf(combined, sizeof(combined), "%s %s", seg->text, temp);
+			strncpy(temp, combined, sizeof(temp) - 1);
+			temp[sizeof(temp) - 1] = '\0';
+			used++;
+			cur_start = seg->start_ms;
+		}
+
+		size_t out_len = strlen(temp);
+		if (out_len >= buf_size)
+			out_len = buf_size - 1;
+		memcpy(buf, temp, out_len);
+		buf[out_len] = '\0';
 	}
 	pthread_mutex_unlock(&s_caption_mutex);
 }
@@ -609,6 +1045,7 @@ void transcription_service_write_srt(const char *video_path)
 {
 	if (!video_path || !video_path[0])
 		return;
+	commit_pending_if_needed(true);
 	/* Derive SRT path: same directory and base name, .srt extension */
 	char srt_path[1024];
 	const char *dot = strrchr(video_path, '.');
@@ -635,6 +1072,16 @@ void transcription_service_write_srt(const char *video_path)
 	if (local_count > 0)
 		memcpy(local_segments, s_caption_segments, local_count * sizeof(caption_segment_t));
 	pthread_mutex_unlock(&s_caption_mutex);
+	/* Ensure chronological order in case segments arrive slightly out of order. */
+	for (uint32_t i = 1; i < local_count; i++) {
+		caption_segment_t key = local_segments[i];
+		uint32_t j = i;
+		while (j > 0 && local_segments[j - 1].start_ms > key.start_ms) {
+			local_segments[j] = local_segments[j - 1];
+			j--;
+		}
+		local_segments[j] = key;
+	}
 
 	if (local_count == 0) {
 		obs_log(LOG_WARNING, "transcription: no segments available; writing empty SRT");
@@ -648,6 +1095,8 @@ void transcription_service_write_srt(const char *video_path)
 		caption_segment_t *seg = &local_segments[i];
 		trim_in_place(seg->text);
 		if (is_empty_or_whitespace(seg->text))
+			continue;
+		if (is_repetitive_phrase(seg->text))
 			continue;
 		if (merged_count == 0) {
 			srt_segment_t *dst = &merged[merged_count++];
@@ -707,6 +1156,7 @@ bool transcription_service_wait_for_idle(uint32_t timeout_ms)
 void transcription_service_init(void)
 {
 	pthread_mutex_init_value(&s_caption_mutex);
+	pthread_mutex_init_value(&s_pending_mutex);
 	pthread_mutex_init_value(&s_input_mutex);
 	pthread_cond_init(&s_input_cond, NULL);
 	s_queue_head = 0;
@@ -716,26 +1166,14 @@ void transcription_service_init(void)
 		s_chunk_queue[i].samples = NULL;
 	s_caption_count = 0;
 	load_transcription_config();
+	if (!s_language)
+		s_language = bstrdup("en");
 #if ENABLE_WHISPER
+	pthread_mutex_init_value(&s_whisper_mutex);
 	s_whisper_ctx = NULL;
-	char *model_path = obs_module_config_path(DEFAULT_MODEL_SUBPATH);
-	if (model_path) {
-		FILE *f = fopen(model_path, "rb");
-		if (f) {
-			fclose(f);
-			s_whisper_ctx = whisper_wrapper_init(model_path, 1);
-			if (s_whisper_ctx)
-				obs_log(LOG_INFO, "transcription: Whisper loaded from %s", model_path);
-			else {
-				s_whisper_ctx = whisper_wrapper_init(model_path, 0);
-				if (s_whisper_ctx)
-					obs_log(LOG_INFO, "transcription: Whisper loaded (CPU) from %s", model_path);
-			}
-		}
-		if (!s_whisper_ctx)
-			obs_log(LOG_WARNING, "transcription: no model at %s; using stub. Add ggml-tiny.en.bin to plugin_config/obs-transcription/models/", model_path ? model_path : "(null)");
-		bfree(model_path);
-	}
+	pthread_mutex_lock(&s_whisper_mutex);
+	transcription_reload_model_locked();
+	pthread_mutex_unlock(&s_whisper_mutex);
 #endif
 
 	s_worker_running = true;
@@ -766,6 +1204,7 @@ void transcription_service_unload(void)
 		whisper_wrapper_free(s_whisper_ctx);
 		s_whisper_ctx = NULL;
 	}
+	pthread_mutex_destroy(&s_whisper_mutex);
 #endif
 
 	if (s_filter_phrases) {
@@ -776,7 +1215,20 @@ void transcription_service_unload(void)
 		bfree(s_replace_phrases);
 		s_replace_phrases = NULL;
 	}
+	if (s_model_file) {
+		bfree(s_model_file);
+		s_model_file = NULL;
+	}
+	if (s_language) {
+		bfree(s_language);
+		s_language = NULL;
+	}
+	if (s_initial_prompt) {
+		bfree(s_initial_prompt);
+		s_initial_prompt = NULL;
+	}
 	pthread_cond_destroy(&s_input_cond);
 	pthread_mutex_destroy(&s_input_mutex);
 	pthread_mutex_destroy(&s_caption_mutex);
+	pthread_mutex_destroy(&s_pending_mutex);
 }

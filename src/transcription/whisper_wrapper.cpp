@@ -42,23 +42,26 @@ void whisper_wrapper_free(whisper_wrapper_ctx_t ctx)
 
 static uint64_t s_last_start_ms = 0;
 
-int whisper_wrapper_run(whisper_wrapper_ctx_t ctx, const float *samples, int n_samples, uint64_t start_ms)
+int whisper_wrapper_run(whisper_wrapper_ctx_t ctx, const float *samples, int n_samples, uint64_t start_ms,
+			const char *language, const char *initial_prompt)
 {
 	if (!ctx || !samples || n_samples <= 0)
 		return -1;
 	s_last_start_ms = start_ms;
-	struct whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+	struct whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
 	wparams.n_threads = 4;
 	wparams.no_timestamps = false;
-	wparams.language = "en";
-	wparams.detect_language = false;
-	/* Reduce hallucinations: suppress blank and non-speech tokens; no initial_prompt (avoids biasing toward endings). */
+	const bool detect_language = (!language || !language[0] || strcmp(language, "auto") == 0);
+	wparams.language = detect_language ? "auto" : language;
+	wparams.detect_language = detect_language;
+	/* Reduce hallucinations: suppress blank and non-speech tokens. */
 	wparams.suppress_blank = true;
 	wparams.suppress_nst = true;
-	wparams.initial_prompt = nullptr; /* was "Meeting transcript:" — biased toward formal/ending phrases */
+	wparams.initial_prompt = (initial_prompt && initial_prompt[0]) ? initial_prompt : nullptr;
 	wparams.no_speech_thold = 0.5f;   /* let more segments through; we filter junk via is_known_hallucination */
-	/* Reduce repetitive hallucination loops (e.g. "The End" repeated): do not use past transcription as prompt. */
-	wparams.no_context = true;
+	/* Allow context to improve accuracy across chunks. */
+	wparams.no_context = false;
+	wparams.beam_search.beam_size = 5;
 	int ret = whisper_full(static_cast<struct whisper_context *>(ctx), wparams, samples, n_samples);
 	return (ret == 0) ? 0 : -1;
 }

@@ -46,9 +46,12 @@ void whisper_wrapper_free(whisper_wrapper_ctx_t ctx);
  * \param samples PCM float samples.
  * \param n_samples Number of samples.
  * \param start_ms Start time of this chunk in recording (ms); added to segment t0/t1.
+ * \param language Language code (e.g. "en") or "auto"/empty to detect.
+ * \param initial_prompt Optional initial prompt to bias domain terms; empty = none.
  * \return 0 on success, non-zero on failure.
  */
-int whisper_wrapper_run(whisper_wrapper_ctx_t ctx, const float *samples, int n_samples, uint64_t start_ms);
+int whisper_wrapper_run(whisper_wrapper_ctx_t ctx, const float *samples, int n_samples, uint64_t start_ms,
+			const char *language, const char *initial_prompt);
 
 /** Number of segments from last whisper_wrapper_run. */
 int whisper_wrapper_get_segment_count(whisper_wrapper_ctx_t ctx);

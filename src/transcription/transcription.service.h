@@ -56,6 +56,18 @@ void transcription_service_set_filter_phrases(const char *value);
 const char *transcription_service_get_replace_phrases(void);
 void transcription_service_set_replace_phrases(const char *value);
 
+/** Whisper model file name (e.g. "ggml-small.en.bin"). */
+const char *transcription_service_get_model_file(void);
+void transcription_service_set_model_file(const char *value);
+
+/** Language code for Whisper (e.g. "en") or "auto" to detect. */
+const char *transcription_service_get_language(void);
+void transcription_service_set_language(const char *value);
+
+/** Initial prompt to bias transcription (optional). */
+const char *transcription_service_get_initial_prompt(void);
+void transcription_service_set_initial_prompt(const char *value);
+
 #ifdef __cplusplus
 }
 #endif
